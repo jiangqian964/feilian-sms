@@ -1,0 +1,38 @@
+# 飞连短信事件转发通用短信网关 — 引导配置示例
+#
+# 说明：本文件只包含「进程启动级」引导项。
+# 飞连接入参数（Verification Token、Encrypt Key、webhook 路径、超时阈值）、
+# 短信通道（各短信厂商的地址/字段映射/签名/密钥）、场景绑定等全部业务配置，
+# 一律在 WebUI 中配置并持久化到 SQLite，修改后热生效、无需重启、无需改本文件。
+#
+# 所有项均可被环境变量覆盖，环境变量优先级高于 YAML（systemd 推荐用 EnvironmentFile
+# 注入 SMSGW_SECRETS_DATA_KEY，避免主密钥落盘）。
+
+server:
+  # 监听地址；内网运维通过 http://<本机IP>:8080/ 访问 WebUI。
+  listen: ":8080"
+  # 可选：允许访问 WebUI 与 /api 的来源网段（直连 IP 判定，不信任 XFF）。
+  # 留空表示不做网络层限制（依赖内网可信边界）。
+  admin_cidrs:
+    - "10.0.0.0/8"
+    # - "192.168.0.0/16"
+
+sqlite:
+  # SQLite 数据库文件路径，部署时放在专用数据目录。
+  path: "/var/lib/sms-gateway/sms.db"
+
+log:
+  # 级别：debug / info / warn / error，默认 info。
+  level: "info"
+  # 格式：json（生产，systemd/journald 采集）/ console（本地排障），默认 json。
+  format: "json"
+
+secrets:
+  # 内联数据密钥（base64 编码的 32 字节），通常经环境变量注入：
+  #   SMSGW_SECRETS_DATA_KEY=<base64>
+  # 非空时优先生效，且不会在磁盘创建密钥文件。生产建议用环境变量而非写这里。
+  # data_key: ""
+
+  # 数据密钥文件路径；留空时默认与 sqlite.path 同目录下的 data.key，
+  # 首启缺失会自动生成（权限 0600）。该文件已在 .gitignore 中，禁止入库。
+  key_path: "/var/lib/sms-gateway/data.key"

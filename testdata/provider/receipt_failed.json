@@ -1,0 +1,7 @@
+{
+  "smsId": "msg-20260914-0002",
+  "appSmsId": "smoke-code-failed-0002",
+  "status": "UNDELIV",
+  "statusMessage": "空号或关机",
+  "seqNo": 1
+}

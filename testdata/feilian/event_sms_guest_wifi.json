@@ -1,0 +1,25 @@
+{
+  "schema": "1.0",
+  "header": {
+    "event_id": "smoke-guest-0001",
+    "token": "smoke-token-001",
+    "create_time": "1700000001000",
+    "event_type": "notify.v1.sms",
+    "app_id": "cli-smoke-app"
+  },
+  "data": {
+    "events": [
+      {
+        "object": {
+          "country_code": "+86",
+          "mobile_number": "13900000057",
+          "mobile": "+8613900000057",
+          "sms_type": "guest_wifi",
+          "template": "您的访客WiFi「%s」账号已开通，密码%s，有效期%s小时。",
+          "params": ["访客网络", "Feilian@2026", "2"],
+          "expired_time": 1700007200
+        }
+      }
+    ]
+  }
+}

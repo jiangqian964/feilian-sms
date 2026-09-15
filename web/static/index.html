@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>飞连短信网关 · 管理台</title>
+  <link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+  <a class="skip-link" href="#main-content">跳到主内容</a>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand" aria-label="系统标识">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <h1 class="topbar-title">飞连短信网关管理台</h1>
+      </div>
+      <nav class="tabs" role="tablist" aria-label="主导航">
+        <button class="tab is-active" role="tab" id="tab-settings" aria-controls="panel-settings" aria-selected="true" data-view="settings">系统设置</button>
+        <button class="tab" role="tab" id="tab-channels" aria-controls="panel-channels" aria-selected="false" data-view="channels">通道</button>
+        <button class="tab" role="tab" id="tab-bindings" aria-controls="panel-bindings" aria-selected="false" data-view="bindings">场景绑定</button>
+        <button class="tab" role="tab" id="tab-records" aria-controls="panel-records" aria-selected="false" data-view="records">发送记录</button>
+      </nav>
+      <div class="health" aria-live="polite">
+        <span class="health-dot" id="health-dot" role="img" aria-label="健康检查中"></span>
+        <span class="health-text" id="health-text">检查中</span>
+      </div>
+    </div>
+  </header>
+
+  <main id="main-content" class="content">
+    <section class="panel is-active" id="panel-settings" role="tabpanel" aria-labelledby="tab-settings" data-view="settings"></section>
+    <section class="panel" id="panel-channels" role="tabpanel" aria-labelledby="tab-channels" data-view="channels" hidden></section>
+    <section class="panel" id="panel-bindings" role="tabpanel" aria-labelledby="tab-bindings" data-view="bindings" hidden></section>
+    <section class="panel" id="panel-records" role="tabpanel" aria-labelledby="tab-records" data-view="records" hidden></section>
+  </main>
+
+  <div class="toast-region" id="toast-region" aria-live="assertive" aria-atomic="false"></div>
+  <div class="modal-root" id="modal-root" hidden></div>
+
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>

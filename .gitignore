@@ -1,0 +1,30 @@
+# 构建产物
+/bin/
+/sms-gateway
+/mockvendor
+
+# SQLite 数据库及 WAL/SHM 临时文件
+*.db
+*.db-wal
+*.db-shm
+
+# 数据密钥（AES-GCM 主密钥，禁止入库）
+data.key
+
+# 本地引导配置（可能含真实密钥/内网地址）
+config.local.yaml
+
+# 覆盖率/性能分析临时产物
+*.profraw
+*.out
+coverage.txt
+
+# 供应商/私有参考资料与内部工作稿（不对外发布；仅保留 testdata 下的自研参考程序）
+/*.java
+*.doc
+*.docx
+/.trae/
+
+# 系统与编辑器杂物
+.DS_Store
+*.swp

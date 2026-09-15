@@ -1,0 +1,25 @@
+{
+  "schema": "1.0",
+  "header": {
+    "event_id": "smoke-code-0001",
+    "token": "smoke-token-001",
+    "create_time": "1700000000000",
+    "event_type": "notify.v1.sms",
+    "app_id": "cli-smoke-app"
+  },
+  "data": {
+    "events": [
+      {
+        "object": {
+          "country_code": "+86",
+          "mobile_number": "13800000056",
+          "mobile": "+8613800000056",
+          "sms_type": "code",
+          "template": "您的验证码是%s，%s分钟内有效，请勿泄露。",
+          "params": ["482916", "5"],
+          "expired_time": 1700000300
+        }
+      }
+    ]
+  }
+}

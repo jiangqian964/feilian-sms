@@ -1,0 +1,54 @@
+[Unit]
+Description=飞连短信事件转发通用短信网关
+Documentation=https://github.com/jiangqian964/feilian-sms
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sms-gateway
+Group=sms-gateway
+WorkingDirectory=/var/lib/sms-gateway
+
+# 经 EnvironmentFile 注入通道密钥主密钥（base64 32 字节），避免主密钥落数据盘；
+# 文件由 install.sh 首装时生成（0640 root:sms-gateway），轮换/备份需人工负责。
+EnvironmentFile=-/etc/sms-gateway/sms-gateway.env
+
+ExecStart=/usr/local/bin/sms-gateway --config /etc/sms-gateway/config.yaml
+
+# 崩溃自动拉起；优雅退出由进程内 SIGTERM 5 秒 Shutdown 完成。
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+
+# 日志统一交 journald：journalctl -u sms-gateway -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sms-gateway
+
+# ---- 最小权限加固（纯 Go + 非特权端口，无需任何 capability）----
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+RemoveIPC=true
+UMask=0077
+# SQLite/WAL 与 data.key 的唯一可写位置。
+ReadWritePaths=/var/lib/sms-gateway
+
+[Install]
+WantedBy=multi-user.target
