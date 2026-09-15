@@ -109,4 +109,4 @@ sudo deploy/install.sh --bin bin/sms-gateway-linux-amd64
 
 ## 许可与免责
 
-本仓库尚未附带独立 LICENSE 文件；如需以开源许可证发布，建议由仓库所有者在根目录添加 `LICENSE`（如 MIT 或 Apache-2.0）。本项目为通用对接参考实现，按“现状”提供，使用者需自行评估其在自身环境中的安全性与合规性。
+本项目基于 [MIT License](./LICENSE) 开源（Copyright (c) 2026 jiangqian964）。本项目为通用对接参考实现，按“现状”提供，不提供任何明示或默示担保；使用者需自行评估其在自身环境中的安全性与合规性。完整条款见根目录 [LICENSE](./LICENSE)。
