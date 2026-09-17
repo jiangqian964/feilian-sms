@@ -112,6 +112,49 @@ gen_data_key() {
 	fi
 }
 
+# 旧版本支持 server.admin_cidrs（管理端来源网段白名单），该来源 IP 限制已移除。
+# 新版引导配置使用严格字段解析，残留的未知键会导致进程启动失败，而本脚本升级时
+# 又保留既有 config.yaml，故在重启前幂等剔除该键（兼容行内与 YAML 块列表两种写法）。
+migrate_drop_admin_cidrs() {
+	[ -f "${CONF_FILE}" ] || return 0
+	grep -q '^[ \t]*admin_cidrs[ \t]*:' "${CONF_FILE}" || return 0
+	if [ "${DRY_RUN}" -ne 0 ]; then
+		echo "[dry-run] 将从 ${CONF_FILE} 剔除已废弃的 admin_cidrs 键"
+		return 0
+	fi
+	echo "发现已废弃的 server.admin_cidrs，重启前从配置剔除: ${CONF_FILE}"
+	local tmp
+	tmp="$(mktemp)"
+	awk '
+function indent_of(ln, p) { p = match(ln, /[^ \t]/); return p ? p - 1 : 0 }
+BEGIN { skip = 0; key_indent = -1 }
+{
+	line = $0
+	# 块形式：继续丢弃比键更深缩进的 "- " 列表项，遇到同级/更浅行恢复输出。
+	if (skip) {
+		if (line ~ /^[ \t]+-[ \t]?/ && indent_of(line) > key_indent) {
+			next
+		}
+		skip = 0
+	}
+	if (line ~ /^[ \t]*admin_cidrs[ \t]*:/) {
+		key_indent = indent_of(line)
+		rest = line
+		sub(/^[ \t]*admin_cidrs[ \t]*:/, "", rest)
+		sub(/^[ \t]+/, "", rest)
+		sub(/[ \t]+$/, "", rest)
+		if (rest == "" || rest ~ /^#/) {
+			skip = 1
+		}
+		next
+	}
+	print line
+}
+' "${CONF_FILE}" >"${tmp}"
+	install -m 0640 -o root -g "${SERVICE_GROUP}" "${tmp}" "${CONF_FILE}"
+	rm -f "${tmp}"
+}
+
 echo "==> 二进制: ${BIN_SRC}"
 echo "==> dry-run: ${DRY_RUN}"
 
@@ -138,8 +181,6 @@ else
 # sms-gateway 通道密钥主密钥（base64 32 字节）。自动生成，请勿入库；
 # 备份数据库时务必单独安全备份本值，丢失后已存通道密钥将无法解密。
 SMSGW_SECRETS_DATA_KEY=${KEY}
-# 如需限制管理端访问网段，逗号分隔（只信直连 IP，忽略 X-Forwarded-For）：
-# SMSGW_SERVER_ADMIN_CIDRS=10.0.0.0/8
 EOF
 		install -m 0640 -o root -g "${SERVICE_GROUP}" "${TMP_ENV}" "${ENV_FILE}"
 		rm -f "${TMP_ENV}"
@@ -153,6 +194,9 @@ else
 	run install -m 0640 -o root -g "${SERVICE_GROUP}" \
 		"${SCRIPT_DIR}/config.example.yaml" "${CONF_FILE}"
 fi
+
+# ---- 4.1 升级迁移：剔除已移除的来源 IP 白名单键（严格 YAML 解析下残留会启动失败）----
+migrate_drop_admin_cidrs
 
 # ---- 5. 二进制（升级时原子替换）----
 run install -m 0755 -o root -g root "${BIN_SRC}" "${BIN_TARGET}"
@@ -178,4 +222,4 @@ else
 	echo "!! 当前环境无 systemctl（容器/非 systemd 主机），已完成文件安装，未注册服务。"
 fi
 
-echo "==> 完成。WebUI 入口: http://<本机IP>:8080/  （端口/网段见 ${CONF_FILE}）"
+echo "==> 完成。WebUI 入口: http://<本机IP>:8080/  （监听端口见 ${CONF_FILE}）"

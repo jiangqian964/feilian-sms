@@ -21,7 +21,7 @@ internal/
     sign/             签名策略：none / sha1_salt / hmac_sha256
   store/              SQLite、配置快照热加载、AES-GCM 密钥信封、发送状态机
   service/            编排层：转发幂等、回执、测试发送、设置运行时
-  httpapi/            Webhook、回执、/health、管理 API（/api）、CIDR 守卫
+  httpapi/            Webhook、回执、/health、管理 API（/api）
   webui/  logging/    内嵌静态资源处理器；Zap 日志与统一出口脱敏
 web/                  前端（原生 HTML/ES Module/CSS）
 deploy/               config 样例、install.sh、systemd unit、全链路冒烟脚本
@@ -57,7 +57,7 @@ Linux 上一键安装（建用户/目录、生成 32 字节随机数据密钥、
 sudo deploy/install.sh --bin bin/sms-gateway-linux-amd64
 ```
 
-启动参数为 `--config <引导配置 YAML>`（留空则纯环境变量启动）；引导配置仅含监听、CIDR、SQLite 路径、日志、数据密钥等启动项，样例见 [config.example.yaml](./deploy/config.example.yaml)。飞连接入参数、通道、字段映射、签名、场景绑定等**业务配置全部在 WebUI 中完成并持久化到 SQLite，改后热生效、无需重启**。浏览器访问 `http://<主机IP>:8080/`（默认端口与网段见引导配置）。
+启动参数为 `--config <引导配置 YAML>`（留空则纯环境变量启动）；引导配置仅含监听、SQLite 路径、日志、数据密钥等启动项，样例见 [config.example.yaml](./deploy/config.example.yaml)。飞连接入参数、通道、字段映射、签名、场景绑定等**业务配置全部在 WebUI 中完成并持久化到 SQLite，改后热生效、无需重启**。浏览器访问 `http://<主机IP>:8080/`（默认端口见引导配置；管理面不做来源 IP 限制，请通过安全组/防火墙等网络边界控制访问，切勿裸露公网）。
 
 ---
 
@@ -88,7 +88,7 @@ sudo deploy/install.sh --bin bin/sms-gateway-linux-amd64
 - 「示例厂商」为虚构对接方；业务错误码（如 `50001`）仅为示例值，实际状态码与文案以对接厂商规范为准；
 - SHA-1 加盐签名策略（`sha1_salt`）的 Go/JDK 双端一致性由 [testdata/GenSignVectors.java](./testdata/GenSignVectors.java) 生成的公开向量互验，输入均为上述演示值。
 
-上线前需要自行落实：真实厂商基址与出网策略、`appCode/appSecret/orgCode/templateCode` 等凭证与短信模板审核、公网异步回执进入内网的方案、Verification Token 与管理端 CIDR 白名单。
+上线前需要自行落实：真实厂商基址与出网策略、`appCode/appSecret/orgCode/templateCode` 等凭证与短信模板审核、公网异步回执进入内网的方案、Verification Token 与管理面网络访问控制（安全组/防火墙/堡垒机/反代 ACL）。
 
 ## 安全
 

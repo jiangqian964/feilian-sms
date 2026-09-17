@@ -1,21 +1,19 @@
 // Package httpapi 是网关入站 HTTP 装配层：
 //   - 飞连事件 webhook：路径在运行时按系统设置比对（故可热改），
-//     限 1MiB、支持可选加密信封、challenge 秒级回显、token 恒定时间校验，
+//     限 1MiB、支持可选加密信封、challenge 秒级 JSON 回显、token 恒定时间校验，
 //     事件交编排层后恒回 200（失败只留痕，避免飞连反复重推）；
 //   - 厂商异步回执：POST /receipts/{channel_id}；
 //   - GET /health：存活探针；
-//   - 管理面（/api 与 WebUI）由可选 CIDR 白名单守卫，只信直连 RemoteAddr。
+//   - 管理面（/api 与 WebUI）直接暴露，不做来源 IP 限制。
 package httpapi
 
 import (
 	"context"
 	"crypto/subtle"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
-	"net/netip"
 	"time"
 
 	"go.uber.org/zap"
@@ -44,8 +42,6 @@ type Deps struct {
 	Receipts *service.ReceiptService
 	// Store 为管理 API 提供配置/记录读写（T11）；事件转发不经此依赖。
 	Store *store.Store
-	// AdminCIDRs 管理端白名单（CIDR）；为空表示不做网络层限制。
-	AdminCIDRs []string
 	// Logger 必传；nil 时回落 nop 日志。
 	Logger *zap.Logger
 	// UI 为 WebUI 静态资源处理器（T12 接入完整四视图）；nil 时不挂载界面。
@@ -54,37 +50,28 @@ type Deps struct {
 
 // Server 持有已完成路由装配的处理器；管理子路由经 AdminMux 暴露给 T11 扩展。
 type Server struct {
-	deps      Deps
-	root      *http.ServeMux
-	admin     *http.ServeMux
-	adminNets []netip.Prefix
+	deps  Deps
+	root  *http.ServeMux
+	admin *http.ServeMux
 }
 
-// NewServer 解析 CIDR 并完成全部路由注册；非法 CIDR 在装配期直接报错。
+// NewServer 完成全部路由注册。
 func NewServer(d Deps) (*Server, error) {
 	if d.Logger == nil {
 		d.Logger = zap.NewNop()
 	}
-	nets := make([]netip.Prefix, 0, len(d.AdminCIDRs))
-	for _, raw := range d.AdminCIDRs {
-		prefix, err := netip.ParsePrefix(raw)
-		if err != nil {
-			return nil, fmt.Errorf("管理端 CIDR 非法 %q: %w", raw, err)
-		}
-		nets = append(nets, prefix.Masked())
-	}
 
-	s := &Server{deps: d, root: http.NewServeMux(), admin: http.NewServeMux(), adminNets: nets}
+	s := &Server{deps: d, root: http.NewServeMux(), admin: http.NewServeMux()}
 	s.registerAdminRoutes()
 
-	// 公网固定路由（不经管理端 CIDR）。
+	// 公网固定路由。
 	s.root.HandleFunc("POST /receipts/{channel_id}", s.handleReceipt)
 	s.root.HandleFunc("GET /health", s.handleHealth)
-	// 管理面：/api 全方法统一过 CIDR 守卫；StripPrefix 后子 mux 以 /settings 等
-	// 相对自身根的模式注册，PathValue 仍可正常取到 {id}。
-	s.root.Handle("/api/", s.adminGuard(http.StripPrefix("/api", s.admin)))
+	// 管理面：/api 全方法直接进入管理子 mux；StripPrefix 后子 mux 以 /settings
+	// 等相对自身根的模式注册，PathValue 仍可正常取到 {id}。
+	s.root.Handle("/api/", http.StripPrefix("/api", s.admin))
 	// 其余路径经根分发：POST 按运行时设置匹配飞连 webhook（路径可热改），
-	// 非 POST 走 CIDR 守卫后的 WebUI 静态资源。
+	// 非 POST 直接返回 WebUI 静态资源。
 	// （不能用 "POST /" 与 "/api/" 并列注册：方法与路径两个维度各有胜负，
 	// 会被 ServeMux 判定为冲突。）
 	s.root.HandleFunc("/", s.dispatchRoot)
@@ -133,7 +120,7 @@ func (s *Server) recoverMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// AdminMux 返回管理面子路由（/api/... 在此注册）；整体已由 CIDR 守卫包裹。
+// AdminMux 返回管理面子路由（/api/... 在此注册）。
 func (s *Server) AdminMux() *http.ServeMux { return s.admin }
 
 // handleHealth 存活探针；no-store 由 writeJSON 统一保证。
@@ -143,7 +130,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 
 // dispatchRoot 处理未被固定模式命中的路径：
 // POST 全部交给飞连 webhook（内部按运行时路径比对，故支持热改路径）；
-// 其余方法进入受 CIDR 守卫的 WebUI；未挂载 UI 时回 404。
+// 其余方法直接返回 WebUI；未挂载 UI 时回 404。
 func (s *Server) dispatchRoot(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		s.handleWebhook(w, r)
@@ -153,7 +140,7 @@ func (s *Server) dispatchRoot(w http.ResponseWriter, r *http.Request) {
 		writeErrorJSON(w, http.StatusNotFound, codeNotFound, "资源不存在")
 		return
 	}
-	s.adminGuard(s.deps.UI).ServeHTTP(w, r)
+	s.deps.UI.ServeHTTP(w, r)
 }
 
 // handleWebhook 处理飞连事件订阅回调。
@@ -177,7 +164,9 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1) url_verification 握手：token 校验通过后原样回显 challenge（须 <1 秒）。
+	// 1) url_verification 握手：token 校验通过后以 JSON 对象原样回显 challenge
+	//    （飞连/飞书事件订阅网关要求 application/json 的 {"challenge":"..."}，须 <1 秒；
+	//    早期版本回 text/plain 裸字符串会被网关以“解析不到 challenge”判定校验失败）。
 	if challenge, isChallenge, perr := feilian.ParseChallenge(plain); perr != nil {
 		writeErrorJSON(w, http.StatusBadRequest, codeBadRequest, perr.Error())
 		return
@@ -187,10 +176,7 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			writeErrorJSON(w, http.StatusUnauthorized, codeUnauthorized, "Verification Token 不匹配")
 			return
 		}
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.Header().Set("Cache-Control", headerNoStore)
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		_, _ = io.WriteString(w, challenge.Challenge)
+		writeJSON(w, map[string]string{"challenge": challenge.Challenge})
 		return
 	}
 

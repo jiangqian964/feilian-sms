@@ -161,11 +161,11 @@ code="$(api PUT /api/bindings "{
 assert_eq "${code}" "200" "bindings PUT"
 echo "✓ 绑定生效"
 
-step "6/10 url_verification 握手（原样回显 challenge）"
+step "6/10 url_verification 握手（JSON 原样回显 challenge）"
 code="$(apif POST "${WEBHOOK}" "${TD}/feilian/url_verification.json")"
 assert_eq "${code}" "200" "challenge HTTP"
-assert_eq "$(resp)" "smoke-challenge-0001" "challenge 必须秒级原样回显"
-echo "✓ challenge 原样返回"
+assert_eq "$(resp | jget challenge)" "smoke-challenge-0001" "challenge 必须秒级以 JSON 对象原样回显"
+echo "✓ challenge 以 JSON 原样返回"
 
 step "7/10 短信事件转发（mockvendor 实收完整厂商报文）"
 code="$(apif POST "${WEBHOOK}" "${TD}/feilian/event_sms_code.json")"

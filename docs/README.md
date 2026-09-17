@@ -42,7 +42,7 @@
 | `internal/channel/sign/` | 签名策略：none / sha1_salt / hmac_sha256 |
 | `internal/store/` | SQLite 持久化、配置快照热加载、AES-256-GCM 信封加密、发送状态机 |
 | `internal/service/` | 编排层：转发幂等、回执、测试发送、设置运行时 |
-| `internal/httpapi/` | HTTP 装配：Webhook、回执、/health、管理 API、CIDR 守卫 |
+| `internal/httpapi/` | HTTP 装配：Webhook、回执、/health、管理 API |
 | `internal/logging/` | Zap 日志构造与统一出口脱敏 core |
 | `internal/webui/` | 内嵌静态资源处理器 |
 | `web/` | 前端资源（原生 HTML/JS/CSS，`go:embed` 内嵌，零 npm/CDN） |
@@ -100,7 +100,7 @@ make build-linux-amd64
 # 2) 安装到 Ubuntu（幂等，首装自动生成 32 字节随机数据密钥）
 sudo deploy/install.sh --bin bin/sms-gateway-linux-amd64
 
-# 3) PC 浏览器打开（端口/网段见 /etc/sms-gateway/config.yaml）
+# 3) PC 浏览器打开（监听地址/端口见 /etc/sms-gateway/config.yaml，仅限受信网络访问）
 #    http://<Ubuntu主机IP>:8080/
 
 # 现场自检（全新临时目录，10 步全链路，不触碰生产库）
@@ -141,7 +141,7 @@ make smoke
 2. 示例厂商公网异步回执如何进入内网（反向映射/反代），回执 URL 在示例厂商申请时填报；
 3. 示例厂商凭证 `appCode / appSecret / orgCode / templateCode` 的申请与短信模板审核进度；
 4. 示例厂商 `code` 模板的参数顺序（与飞连参数顺序不一致时用绑定的「参数下标序列」修正）；
-5. 监听端口（建议 8080）与管理端 CIDR 白名单网段；
+5. 监听端口（建议 8080）与管理面网络访问控制（安全组/主机防火墙/堡垒机/反代 ACL）；
 6. 在飞连后台创建事件订阅、勾选短信通知事件、获取 Verification Token 的时间点。
 
 ---

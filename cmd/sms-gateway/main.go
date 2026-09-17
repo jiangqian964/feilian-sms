@@ -87,13 +87,12 @@ func main() {
 	}
 
 	srv, err := httpapi.NewServer(httpapi.Deps{
-		Settings:   settingsRT,
-		Forward:    forwardSvc,
-		Receipts:   receiptSvc,
-		Store:      st,
-		AdminCIDRs: cfg.Server.AdminCIDRs,
-		Logger:     logger,
-		UI:         uiHandler,
+		Settings: settingsRT,
+		Forward:  forwardSvc,
+		Receipts: receiptSvc,
+		Store:    st,
+		Logger:   logger,
+		UI:       uiHandler,
 	})
 	if err != nil {
 		logger.Fatal("HTTP 装配失败", zap.Error(err))
@@ -112,8 +111,7 @@ func main() {
 	serverErr := make(chan error, 1)
 	go func() {
 		logger.Info("sms-gateway 启动",
-			zap.String("listen", cfg.Server.Listen),
-			zap.Strings("admin_cidrs", cfg.Server.AdminCIDRs))
+			zap.String("listen", cfg.Server.Listen))
 		if listenErr := httpSrv.ListenAndServe(); listenErr != nil && !errors.Is(listenErr, http.ErrServerClosed) {
 			serverErr <- listenErr
 		}

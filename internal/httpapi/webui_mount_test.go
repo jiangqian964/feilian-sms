@@ -1,4 +1,4 @@
-// WebUI 装配测试：内嵌静态资源挂在根路径、与 /api 共用 CIDR 守卫、未装配时 JSON 404。
+// WebUI 装配测试：内嵌静态资源挂在根路径、未装配时 JSON 404。
 package httpapi
 
 import (
@@ -12,7 +12,7 @@ import (
 	"feilian-sms/internal/webui"
 )
 
-func buildServerWithUI(t *testing.T, cidrs ...string) *Server {
+func buildServerWithUI(t *testing.T) *Server {
 	t.Helper()
 	st, cache, sender := newTestEnv(t)
 	ui, err := webui.Handler()
@@ -20,13 +20,12 @@ func buildServerWithUI(t *testing.T, cidrs ...string) *Server {
 		t.Fatal(err)
 	}
 	srv, err := NewServer(Deps{
-		Settings:   service.NewSettingsRuntime(cache),
-		Forward:    service.NewForwardService(st, cache, sender),
-		Receipts:   service.NewReceiptService(st, cache),
-		Store:      st,
-		AdminCIDRs: cidrs,
-		Logger:     zap.NewNop(),
-		UI:         ui,
+		Settings: service.NewSettingsRuntime(cache),
+		Forward:  service.NewForwardService(st, cache, sender),
+		Receipts: service.NewReceiptService(st, cache),
+		Store:    st,
+		Logger:   zap.NewNop(),
+		UI:       ui,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -63,22 +62,5 @@ func TestWebUINilReturnsJSON404(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), `"code"`) {
 		t.Fatalf("404 必须是统一 JSON 错误体，实际 %s", w.Body.String())
-	}
-}
-
-func TestWebUIGovernedByAdminCIDR(t *testing.T) {
-	srv := buildServerWithUI(t, "10.0.0.0/8")
-
-	if w := do(srv, http.MethodGet, "/", nil, "10.1.2.3:5000", nil); w.Code != http.StatusOK {
-		t.Fatalf("白名单内地址应可访问 WebUI，实际 %d", w.Code)
-	}
-	w := do(srv, http.MethodGet, "/", nil, "192.168.1.1:5000", nil)
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("白名单外地址应 403，实际 %d", w.Code)
-	}
-	// X-Forwarded-For 必须被无视：直连地址在白名单内即放行。
-	if w := do(srv, http.MethodGet, "/", nil, "10.1.2.3:5000",
-		map[string]string{"X-Forwarded-For": "1.2.3.4"}); w.Code != http.StatusOK {
-		t.Fatalf("只信直连 RemoteAddr，XFF 不得影响判定，实际 %d", w.Code)
 	}
 }

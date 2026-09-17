@@ -1,5 +1,5 @@
 // Package httpapi 是网关入站 HTTP 装配层：飞连事件 webhook（路径热匹配）、
-// 厂商回执、健康检查、统一错误体与管理端 CIDR 守卫。本文件覆盖 TR-10.1~10.4。
+// 厂商回执、健康检查与统一错误体。本文件覆盖 TR-10.1~10.3。
 package httpapi
 
 import (
@@ -94,15 +94,14 @@ func saveSettings(t *testing.T, st *store.Store, s store.Settings) {
 	}
 }
 
-func buildServer(t *testing.T, st *store.Store, cache *store.Cache, sender service.Sender, cidrs ...string) *Server {
+func buildServer(t *testing.T, st *store.Store, cache *store.Cache, sender service.Sender) *Server {
 	t.Helper()
 	srv, err := NewServer(Deps{
-		Settings:   service.NewSettingsRuntime(cache),
-		Forward:    service.NewForwardService(st, cache, sender),
-		Receipts:   service.NewReceiptService(st, cache),
-		Store:      st,
-		AdminCIDRs: cidrs,
-		Logger:     zap.NewNop(),
+		Settings: service.NewSettingsRuntime(cache),
+		Forward:  service.NewForwardService(st, cache, sender),
+		Receipts: service.NewReceiptService(st, cache),
+		Store:    st,
+		Logger:   zap.NewNop(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -130,6 +129,19 @@ func do(srv *Server, method, path string, body []byte, remote string, headers ma
 
 func challengeBody(token, value string) []byte {
 	return []byte(fmt.Sprintf(`{"challenge":%q,"token":%q,"type":"url_verification"}`, value, token))
+}
+
+// challengeEcho 解析握手 JSON 响应 {"challenge":"..."} 并回取 challenge 字段；
+// 飞连/飞书事件订阅网关要求握手成功响应为 JSON 对象而非 text/plain 裸字符串。
+func challengeEcho(t *testing.T, body []byte) string {
+	t.Helper()
+	var echo struct {
+		Challenge string `json:"challenge"`
+	}
+	if err := json.Unmarshal(body, &echo); err != nil {
+		t.Fatalf("握手响应必须为 JSON 对象 {\"challenge\":...}，实际 %q: %v", string(body), err)
+	}
+	return echo.Challenge
 }
 
 func smsEvent(eventID, token, smsType, mobile string, params []string) []byte {
@@ -180,8 +192,11 @@ func TestChallengeEchoUnderOneSecond(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("challenge 应回 200，实际 %d: %s", w.Code, w.Body.String())
 	}
-	if w.Body.String() != "ch-abc-123" {
-		t.Fatalf("challenge 必须原样回显，实际 %q", w.Body.String())
+	if got := challengeEcho(t, w.Body.Bytes()); got != "ch-abc-123" {
+		t.Fatalf("challenge 必须以 JSON 对象原样回显，实际 %q", w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); ct != jsonContentType {
+		t.Fatalf("challenge 响应必须为 %q，实际 %q", jsonContentType, ct)
 	}
 	if elapsed >= time.Second {
 		t.Fatalf("challenge 回显耗时 %v，超过 1 秒要求", elapsed)
@@ -289,11 +304,11 @@ func TestEncryptKeyRejectsPlaintextAndAcceptsSealedChallenge(t *testing.T) {
 		t.Fatalf("配置 key 后的明文信封应 400，实际 %d", w.Code)
 	}
 
-	// 合法加密信封：先解密再走 challenge 回显。
+	// 合法加密信封：先解密再走 challenge JSON 回显。
 	sealed := sealEncrypted(t, "enc-key-0123456789", challengeBody(testToken, "ch-secret-9"))
 	w = do(srv, http.MethodPost, testPath, sealed, "10.0.0.1:5000", nil)
-	if w.Code != http.StatusOK || w.Body.String() != "ch-secret-9" {
-		t.Fatalf("加密 challenge 应解密并原样回显，实际 %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusOK || challengeEcho(t, w.Body.Bytes()) != "ch-secret-9" {
+		t.Fatalf("加密 challenge 应解密并以 JSON 原样回显，实际 %d: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -349,8 +364,8 @@ func TestWebhookPathAndTokenHotReload(t *testing.T) {
 	}
 	// 新路径 + 新 token 正常。
 	if w := do(srv, http.MethodPost, "/new/hook", challengeBody("vtok-new", "ch-new"), "10.0.0.1:5000", nil); w.Code != 200 ||
-		w.Body.String() != "ch-new" {
-		t.Fatalf("新路径新 token 应 200 且回显，实际 %d: %s", w.Code, w.Body.String())
+		challengeEcho(t, w.Body.Bytes()) != "ch-new" {
+		t.Fatalf("新路径新 token 应 200 且以 JSON 回显，实际 %d: %s", w.Code, w.Body.String())
 	}
 }
 

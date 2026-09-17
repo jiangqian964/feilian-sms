@@ -6,14 +6,12 @@
 ## 1. 通用约定
 
 - **Base URL**：`http://<主机>:<端口>`（默认端口 8080）。
-- **请求/响应编码**：`Content-Type: application/json; charset=utf-8`；飞连握手成功响应为 `text/plain`；回执响应为通道配置体（默认 JSON）。
+- **请求/响应编码**：`Content-Type: application/json; charset=utf-8`；飞连握手成功响应为 JSON 对象 `{"challenge":"..."}`；回执响应为通道配置体（默认 JSON）。
 - **字符集**：UTF-8；时间字段除特别说明外均为 **Unix 毫秒时间戳（整数）**。
 - **请求体上限**：1 MiB（Webhook、回执、管理 API 统一），超限返回 413。
 - **缓存**：所有响应带 `Cache-Control: no-store` 与 `X-Content-Type-Options: nosniff`。
-- **三类路由的可达性**：
-  - Webhook（路径取系统设置，默认 `/feilian/sms/events`）、`/receipts/{channel_id}`、`GET /health`：**不经**管理端 CIDR；
-  - `/api/*` 与 WebUI 静态资源：受可选管理端 CIDR 白名单约束（按直连 `RemoteAddr` 判定，忽略 `X-Forwarded-For`）；未配置白名单则不限制。
-- **鉴权**：应用层无登录；飞连来源由 `header.token`（Verification Token，恒定时间比较）校验；厂商回执在系统设置了回执鉴权 Token 时须携带 `X-Receipt-Token` 头（或 `?token=` 查询参数），恒定时间比较；管理面安全边界为内网 + 可选 CIDR。
+- **路由可达性**：Webhook（路径取系统设置，默认 `/feilian/sms/events`）、`/receipts/{channel_id}`、`GET /health`、`/api/*` 与 WebUI 静态资源**均不做来源 IP 限制**，应用层对所有路由一视同仁可达；管理面（`/api`、WebUI）的访问控制必须在网络边界（安全组/主机防火墙/堡垒机/反代 ACL）落实，切勿将管理口裸露公网。
+- **鉴权**：应用层无登录；飞连来源由 `header.token`（Verification Token，恒定时间比较）校验；厂商回执在系统设置了回执鉴权 Token 时须携带 `X-Receipt-Token` 头（或 `?token=` 查询参数），恒定时间比较；管理面无应用层鉴权，安全边界为网络分区与边界访问控制。
 
 ### 1.1 统一错误响应
 
@@ -25,7 +23,6 @@
 |---|---|---|
 | 400 | `bad_request` | JSON 非法、字段校验失败、事件报文不可解析、应解密但无 key、回执体损坏 |
 | 401 | `unauthorized` | 飞连 Verification Token 不匹配；已启用回执鉴权时回执 Token 缺失或不匹配 |
-| 403 | `forbidden` | 管理端来源不在 CIDR 白名单 |
 | 404 | `not_found` | Webhook 路径不存在、通道/记录不存在、回执通道不存在、接口不存在 |
 | 409 | `conflict` | 对已停用通道发起测试发送 |
 | 413 | `payload_too_large` | 请求体超过 1 MiB |
@@ -76,10 +73,11 @@
 ```json
 { "challenge": "smoke-challenge-0001", "token": "smoke-token-001", "type": "url_verification" }
 ```
-- token 与系统设置一致：**200**，`Content-Type: text/plain; charset=utf-8`，响应体逐字符等于：
+- token 与系统设置一致：**200**，`Content-Type: application/json; charset=utf-8`，响应体为 JSON 对象，其 `challenge` 字段与请求值逐字符一致：
+```json
+{ "challenge": "smoke-challenge-0001" }
 ```
-smoke-challenge-0001
-```
+  > 飞连/飞书事件订阅网关按 JSON 解析响应并读取 `challenge` 字段；切勿返回 `text/plain` 裸字符串，否则网关解析不到该字段会判定地址校验失败。
 - token 不符：401 `{"code":"unauthorized","message":"Verification Token 不匹配"}`。
 - 配置 Encrypt Key 时请求体为加密信封，服务先解密再判定。
 

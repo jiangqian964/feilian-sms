@@ -30,9 +30,6 @@ func TestLoadConfig(t *testing.T) {
 			yaml: `
 server:
   listen: ":9090"
-  admin_cidrs:
-    - "10.0.0.0/8"
-    - "192.168.1.0/24"
 sqlite:
   path: "/var/lib/smsgw/sms.db"
 log:
@@ -44,9 +41,6 @@ secrets:
 			assertion: func(t *testing.T, c *Config) {
 				if c.Server.Listen != ":9090" {
 					t.Errorf("listen = %q", c.Server.Listen)
-				}
-				if len(c.Server.AdminCIDRs) != 2 || c.Server.AdminCIDRs[1] != "192.168.1.0/24" {
-					t.Errorf("admin_cidrs = %#v", c.Server.AdminCIDRs)
 				}
 				if c.SQLite.Path != "/var/lib/smsgw/sms.db" {
 					t.Errorf("sqlite.path = %q", c.SQLite.Path)
@@ -126,24 +120,10 @@ log:
 			wantErr: "log.format",
 		},
 		{
-			name: "非法 admin CIDR",
-			yaml: `
-server:
-  listen: ":8080"
-  admin_cidrs:
-    - "not-a-cidr"
-sqlite:
-  path: "./sms.db"
-`,
-			wantErr: "admin_cidrs",
-		},
-		{
 			name: "环境变量覆盖全部引导项",
 			yaml: `
 server:
   listen: ":8080"
-  admin_cidrs:
-    - "10.0.0.0/8"
 sqlite:
   path: "./sms.db"
 log:
@@ -153,20 +133,16 @@ secrets:
   key_path: "./old.key"
 `,
 			env: map[string]string{
-				"SMSGW_SERVER_LISTEN":      ":7070",
-				"SMSGW_SERVER_ADMIN_CIDRS": "172.16.0.0/12,127.0.0.1/32",
-				"SMSGW_SQLITE_PATH":        "/data/sms.db",
-				"SMSGW_LOG_LEVEL":          "error",
-				"SMSGW_LOG_FORMAT":         "console",
-				"SMSGW_SECRETS_DATA_KEY":   "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXowMTIzNDU=",
-				"SMSGW_SECRETS_KEY_PATH":   "/data/new.key",
+				"SMSGW_SERVER_LISTEN":    ":7070",
+				"SMSGW_SQLITE_PATH":      "/data/sms.db",
+				"SMSGW_LOG_LEVEL":        "error",
+				"SMSGW_LOG_FORMAT":       "console",
+				"SMSGW_SECRETS_DATA_KEY": "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXowMTIzNDU=",
+				"SMSGW_SECRETS_KEY_PATH": "/data/new.key",
 			},
 			assertion: func(t *testing.T, c *Config) {
 				if c.Server.Listen != ":7070" {
 					t.Errorf("env listen = %q", c.Server.Listen)
-				}
-				if len(c.Server.AdminCIDRs) != 2 || c.Server.AdminCIDRs[0] != "172.16.0.0/12" {
-					t.Errorf("env admin_cidrs = %#v", c.Server.AdminCIDRs)
 				}
 				if c.SQLite.Path != "/data/sms.db" {
 					t.Errorf("env sqlite.path = %q", c.SQLite.Path)

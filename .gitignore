@@ -2,6 +2,7 @@
 /bin/
 /sms-gateway
 /mockvendor
+*.tar.gz
 
 # SQLite 数据库及 WAL/SHM 临时文件
 *.db

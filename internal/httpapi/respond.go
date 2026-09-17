@@ -9,7 +9,6 @@ import (
 const (
 	codeBadRequest      = "bad_request"
 	codeUnauthorized    = "unauthorized"
-	codeForbidden       = "forbidden"
 	codeNotFound        = "not_found"
 	codeConflict        = "conflict"
 	codePayloadTooLarge = "payload_too_large"

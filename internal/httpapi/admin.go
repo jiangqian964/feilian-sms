@@ -1,5 +1,5 @@
 // 管理 API（/api）装配：系统设置、预置、通道 CRUD/启停/测试发送、
-// 场景绑定、发送记录。所有路由挂在经 CIDR 守卫包裹的 admin 子 mux 上；
+// 场景绑定、发送记录。所有路由挂在 admin 子 mux 上；
 // 统一结构化错误体、统一 no-store（见 respond.go）。
 package httpapi
 

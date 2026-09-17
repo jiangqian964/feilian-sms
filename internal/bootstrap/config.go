@@ -1,5 +1,5 @@
 // Package bootstrap 只负责进程启动期的引导配置：
-// 监听地址、SQLite 路径、日志、数据密钥来源、管理端 CIDR。
+// 监听地址、SQLite 路径、日志、数据密钥来源。
 // 所有业务配置（飞连参数、通道、绑定）一律存 SQLite、在 WebUI 管理，
 // 不进入本 YAML，避免业务变更需要重新发版或登录主机改文件。
 package bootstrap
@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/netip"
 	"os"
 	"strings"
 
@@ -23,12 +22,10 @@ type Config struct {
 	Secrets SecretsConfig `yaml:"secrets"`
 }
 
-// ServerConfig 控制 HTTP 监听与管理端访问控制。
+// ServerConfig 控制 HTTP 监听。
 type ServerConfig struct {
 	// Listen 形如 ":8080" 或 "127.0.0.1:8080"。
 	Listen string `yaml:"listen"`
-	// AdminCIDRs 可选，作用于 /api 与 UI；为空表示不做网络层限制。
-	AdminCIDRs []string `yaml:"admin_cidrs"`
 }
 
 // SQLiteConfig 指向 SQLite 数据库文件。
@@ -54,15 +51,14 @@ type SecretsConfig struct {
 	KeyPath string `yaml:"key_path"`
 }
 
-// 支持的环境变量：SMSGW_ 前缀 + 大写下划线路径，列表以英文逗号分隔。
+// 支持的环境变量：SMSGW_ 前缀 + 大写下划线路径。
 const (
-	envServerListen    = "SMSGW_SERVER_LISTEN"
-	envServerAdminCIDR = "SMSGW_SERVER_ADMIN_CIDRS"
-	envSQLitePath      = "SMSGW_SQLITE_PATH"
-	envLogLevel        = "SMSGW_LOG_LEVEL"
-	envLogFormat       = "SMSGW_LOG_FORMAT"
-	envSecretsDataKey  = "SMSGW_SECRETS_DATA_KEY"
-	envSecretsKeyPath  = "SMSGW_SECRETS_KEY_PATH"
+	envServerListen   = "SMSGW_SERVER_LISTEN"
+	envSQLitePath     = "SMSGW_SQLITE_PATH"
+	envLogLevel       = "SMSGW_LOG_LEVEL"
+	envLogFormat      = "SMSGW_LOG_FORMAT"
+	envSecretsDataKey = "SMSGW_SECRETS_DATA_KEY"
+	envSecretsKeyPath = "SMSGW_SECRETS_KEY_PATH"
 )
 
 var (
@@ -106,9 +102,6 @@ func applyEnv(c *Config) {
 	if v, ok := os.LookupEnv(envServerListen); ok {
 		c.Server.Listen = v
 	}
-	if v, ok := os.LookupEnv(envServerAdminCIDR); ok {
-		c.Server.AdminCIDRs = splitCSV(v)
-	}
 	if v, ok := os.LookupEnv(envSQLitePath); ok {
 		c.SQLite.Path = v
 	}
@@ -124,17 +117,6 @@ func applyEnv(c *Config) {
 	if v, ok := os.LookupEnv(envSecretsKeyPath); ok {
 		c.Secrets.KeyPath = v
 	}
-}
-
-func splitCSV(v string) []string {
-	parts := strings.Split(v, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
 }
 
 // Validate 校验引导配置，错误信息为中文并带字段标识，供启动快速失败。
@@ -160,12 +142,6 @@ func (c *Config) Validate() error {
 		c.Log.Format = "json"
 	} else if !validLogFormats[c.Log.Format] {
 		errs = append(errs, fmt.Sprintf("log.format 非法 %q，可选 json/console", c.Log.Format))
-	}
-
-	for i, cidr := range c.Server.AdminCIDRs {
-		if _, err := netip.ParsePrefix(cidr); err != nil {
-			errs = append(errs, fmt.Sprintf("server.admin_cidrs[%d] 非法 %q: %v", i, cidr, err))
-		}
 	}
 
 	return errors.Join(errsToErrors(errs)...)
