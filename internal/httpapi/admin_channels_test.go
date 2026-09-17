@@ -338,6 +338,10 @@ func TestAdminChannelFromPreset(t *testing.T) {
 	if err := json.Unmarshal(ch.Config, &cfg); err != nil {
 		t.Fatal(err)
 	}
+	// 预置必须自带失败态值（三态回执），前端表单也会原样回传，保存后不得丢失。
+	if cfg.Receipt.FailureValue != "UNDELIV" || cfg.Receipt.DeliveredValue != "DELIVRD" {
+		t.Fatalf("预置回执成功/失败值异常: %+v", cfg.Receipt)
+	}
 	w = adminJSON(t, srv, http.MethodPut, "/api/channels/"+ch.ID, channelRequest{
 		Name:    "示例厂商生产",
 		Config:  ch.Config,
@@ -345,6 +349,21 @@ func TestAdminChannelFromPreset(t *testing.T) {
 	})
 	if w.Code != http.StatusOK {
 		t.Fatalf("补密钥后更新 = %d, body=%s", w.Code, w.Body.String())
+	}
+
+	// 再读回：failure_value 必须随配置全量往返保留（WebUI 保存不削弱三态判定）。
+	w = adminJSON(t, srv, http.MethodGet, "/api/channels/"+ch.ID, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET = %d", w.Code)
+	}
+	var got channelResponse
+	jdecode(t, w, &got)
+	var gotCfg channel.Config
+	if err := json.Unmarshal(got.Config, &gotCfg); err != nil {
+		t.Fatal(err)
+	}
+	if gotCfg.Receipt.FailureValue != "UNDELIV" {
+		t.Fatalf("更新后 failure_value 丢失，回执三态退化: %+v", gotCfg.Receipt)
 	}
 }
 

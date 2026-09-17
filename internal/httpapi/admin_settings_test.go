@@ -12,15 +12,17 @@ import (
 
 // settingsView 是测试侧对 GET /api/settings 响应结构的镜像。
 type settingsView struct {
-	VerificationToken   string `json:"verification_token"`
-	EncryptKeySet       bool   `json:"encrypt_key_set"`
-	EncryptKeyMasked    string `json:"encrypt_key_masked"`
-	WebhookPath         string `json:"webhook_path"`
-	WebhookURL          string `json:"webhook_url"`
-	PublicBaseURL       string `json:"public_base_url"`
-	DownstreamTimeoutMS int    `json:"downstream_timeout_ms"`
-	StalePendingMS      int    `json:"stale_pending_ms"`
-	UpdatedAt           int64  `json:"updated_at"`
+	VerificationToken      string `json:"verification_token"`
+	EncryptKeySet          bool   `json:"encrypt_key_set"`
+	EncryptKeyMasked       string `json:"encrypt_key_masked"`
+	ReceiptAuthTokenSet    bool   `json:"receipt_auth_token_set"`
+	ReceiptAuthTokenMasked string `json:"receipt_auth_token_masked"`
+	WebhookPath            string `json:"webhook_path"`
+	WebhookURL             string `json:"webhook_url"`
+	PublicBaseURL          string `json:"public_base_url"`
+	DownstreamTimeoutMS    int    `json:"downstream_timeout_ms"`
+	StalePendingMS         int    `json:"stale_pending_ms"`
+	UpdatedAt              int64  `json:"updated_at"`
 }
 
 func getSettingsView(t *testing.T, srv *Server) settingsView {

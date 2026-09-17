@@ -9,6 +9,7 @@ const ERROR_LABEL = {
   unbound: '场景未绑定', binding_disabled: '绑定已停用', channel_disabled: '通道已停用',
   channel_not_found: '通道不存在', invalid_mobile: '手机号非法', render: '配置渲染失败',
   vendor: '厂商业务失败', network: '网络错误', timeout: '下游超时', internal: '内部错误',
+  resend_exhausted: '补发次数耗尽',
 };
 
 export async function mountChannels(root) {
@@ -188,7 +189,12 @@ export async function mountChannels(root) {
         okText: '确认删除', danger: true,
       });
       if (!ok) return;
-      await api.del(`/api/channels/${ch.id}`);
+      try {
+        await api.del(`/api/channels/${ch.id}`);
+      } catch (err) {
+        toast('error', `删除失败：${err.message}`);
+        return;
+      }
       toast('success', '通道已删除');
       state.selected = null;
       await refresh(false);
@@ -228,16 +234,21 @@ export async function mountChannels(root) {
     function renderResult(r) {
       clear(resultBox);
       const ok = !!r.success;
+      const pending = !!r.pending && !ok;
+      const [headLabel, variant] = ok ? ['厂商受理成功', 'success']
+        : pending ? ['结果不确定，已转补发队列', 'warn'] : ['厂商返回失败', 'danger'];
       resultBox.append(h('div', { style: 'margin-top:12px' },
         h('div', { class: 'actions', style: 'margin-bottom:8px' },
-          badge(ok ? '厂商受理成功' : '厂商返回失败', ok ? 'success' : 'danger'),
+          badge(headLabel, variant),
           h('span', { class: 'card-hint', text: `HTTP ${r.http_code}` })),
         h('dl', { class: 'kv-grid' },
           h('dt', { text: 'appSmsId' }), h('dd', { class: 'mono', text: r.app_sms_id || '—' }),
           h('dt', { text: '厂商消息 ID' }), h('dd', { class: 'mono', text: r.provider_msg_id || '—' }),
           h('dt', { text: '错误分类' }), h('dd', { text: r.error_kind ? (ERROR_LABEL[r.error_kind] || r.error_kind) : '—' }),
           h('dt', { text: '描述' }), h('dd', { text: r.message || '—' }))));
-      toast(ok ? 'success' : 'warn', ok ? '测试发送成功' : '测试发送完成但厂商返回失败');
+      if (ok) toast('success', '测试发送成功');
+      else if (pending) toast('warn', '结果不确定：记录保存在途，将由补发任务自动重试');
+      else toast('warn', '测试发送完成但厂商返回失败');
     }
 
     return h('div', { class: 'card' },
@@ -349,7 +360,7 @@ function minimalConfig(base, url) {
     mobile_policy: 'cc_prefix',
     receipt: {
       msg_id_path: '', app_msg_id_path: '', status_path: '', delivered_value: '',
-      message_path: '', seq_no_path: '', success_body: '',
+      failure_value: '', message_path: '', seq_no_path: '', success_body: '',
     },
   };
 }

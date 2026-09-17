@@ -60,6 +60,7 @@ func BuiltinPresetConfig() *Config {
 			AppMsgIDPath:   "appSmsId",
 			StatusPath:     "status",
 			DeliveredValue: "DELIVRD",
+			FailureValue:   "UNDELIV",
 			MessagePath:    "statusMessage",
 			SeqNoPath:      "seqNo",
 		},

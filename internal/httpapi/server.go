@@ -8,7 +8,8 @@
 package httpapi
 
 import (
-	"encoding/json"
+	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"io"
@@ -29,6 +30,9 @@ const maxBodyBytes = 1 << 20
 
 // smsEventType 是本服务唯一处理的飞连事件类型；其余类型记日志后回 200。
 const smsEventType = "notify.v1.sms"
+
+// receiptTokenHeader 是厂商回执鉴权 token 的请求头名；同时兼容 ?token= 查询参数。
+const receiptTokenHeader = "X-Receipt-Token"
 
 // acceptedBody 是事件被接收后的恒 200 响应体（飞连仅以 HTTP 状态判定重推）。
 const acceptedBody = `{"code":0,"message":"success"}`
@@ -87,8 +91,47 @@ func NewServer(d Deps) (*Server, error) {
 	return s, nil
 }
 
-// Handler 返回根处理器（供 http.Server 使用）。
-func (s *Server) Handler() http.Handler { return s.root }
+// Handler 返回根处理器（供 http.Server 使用）；统一包裹 panic 恢复中间件，
+// 任何处理器内的意外 panic 都落结构化日志并回统一 500，而不是断连/裸堆栈。
+func (s *Server) Handler() http.Handler { return s.recoverMiddleware(s.root) }
+
+// statusTrackingWriter 记录响应是否已提交，panic 恢复时据此决定能否补 500。
+type statusTrackingWriter struct {
+	http.ResponseWriter
+	committed bool
+}
+
+func (w *statusTrackingWriter) WriteHeader(code int) {
+	w.committed = true
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusTrackingWriter) Write(b []byte) (int, error) {
+	w.committed = true
+	return w.ResponseWriter.Write(b)
+}
+
+// recoverMiddleware 兜底所有处理器 panic：未提交响应时回统一 500；
+// 已提交（如边写边 panic）则仅记录日志，避免二次写头部。
+func (s *Server) recoverMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tw := &statusTrackingWriter{ResponseWriter: w}
+		defer func() {
+			if rec := recover(); rec != nil {
+				s.deps.Logger.Error("HTTP 处理器发生 panic，已恢复",
+					zap.String("method", r.Method),
+					zap.String("path", r.URL.Path),
+					zap.String("remote_addr", r.RemoteAddr),
+					zap.Any("panic", rec),
+					zap.Stack("stack"))
+				if !tw.committed {
+					writeErrorJSON(tw, http.StatusInternalServerError, codeInternal, "服务器内部错误")
+				}
+			}
+		}()
+		next.ServeHTTP(tw, r)
+	})
+}
 
 // AdminMux 返回管理面子路由（/api/... 在此注册）；整体已由 CIDR 守卫包裹。
 func (s *Server) AdminMux() *http.ServeMux { return s.admin }
@@ -151,24 +194,35 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2) 非短信事件：仅留日志，回 200 且不调用编排层。
-	if eventType := probeEventType(plain); eventType != "" && eventType != smsEventType {
-		s.deps.Logger.Info("忽略非短信事件", zap.String("event_type", eventType))
-		writeAccepted(w)
-		return
-	}
-
-	// 3) 短信事件信封解析与 token 校验（不过不触发任何编排动作）。
-	env, err := feilian.ParseEnvelope(plain)
+	// 2) 先只解析头部并校验 token：鉴权必须先于任何类型分流，未通过校验的请求
+	// 不得借「非短信事件 200」分支探测 webhook 有效性或获得差异化响应。
+	head, err := feilian.ParseEventHeader(plain)
 	if err != nil {
 		writeErrorJSON(w, http.StatusBadRequest, codeBadRequest, err.Error())
 		return
 	}
-	if !feilian.TokenEqual(env.Header.Token, s.deps.Settings.VerificationToken()) {
+	if !feilian.TokenEqual(head.Header.Token, s.deps.Settings.VerificationToken()) {
 		s.deps.Logger.Warn("飞连事件 token 校验失败",
-			zap.String("event_id", env.Header.EventID),
-			zap.String("event_type", env.Header.EventType))
+			zap.String("event_id", head.Header.EventID),
+			zap.String("event_type", head.Header.EventType))
 		writeErrorJSON(w, http.StatusUnauthorized, codeUnauthorized, "Verification Token 不匹配")
+		return
+	}
+
+	// 3) 非短信事件：鉴权通过后仅留日志，回 200 且不调用编排层（其 object
+	// 结构与短信无关，故不能走短信信封的严格校验）。
+	if head.Header.EventType != smsEventType {
+		s.deps.Logger.Info("忽略非短信事件",
+			zap.String("event_id", head.Header.EventID),
+			zap.String("event_type", head.Header.EventType))
+		writeAccepted(w)
+		return
+	}
+
+	// 4) 短信事件再做信封与 object 的严格校验。
+	env, err := feilian.ParseEnvelope(plain)
+	if err != nil {
+		writeErrorJSON(w, http.StatusBadRequest, codeBadRequest, err.Error())
 		return
 	}
 
@@ -177,14 +231,16 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		objects = append(objects, ev.Object)
 	}
 
-	// 4) 交编排层；任何单条失败都在内部消化，入站恒 200。
+	// 5) 交编排层；任何单条失败都在内部消化，入站恒 200。
+	// 不透传入站 ctx：编排层以服务自持上下文执行，客户端断连不影响下发/回写。
 	start := time.Now()
-	result := s.deps.Forward.HandleEvent(r.Context(), env.Header.EventID, objects)
+	result := s.deps.Forward.HandleEvent(context.Background(), env.Header.EventID, objects)
 	s.deps.Logger.Info("飞连事件处理完成",
 		zap.String("event_id", env.Header.EventID),
 		zap.Int("total", result.Total),
 		zap.Int("succeeded", result.Succeeded),
 		zap.Int("failed", result.Failed),
+		zap.Int("pending", result.Pending),
 		zap.Int("skipped", result.Skipped),
 		zap.Int64("elapsed_ms", time.Since(start).Milliseconds()))
 
@@ -194,13 +250,23 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 // handleReceipt 接收厂商异步送达回执并原样返回通道配置的成功响应。
 func (s *Server) handleReceipt(w http.ResponseWriter, r *http.Request) {
 	channelID := r.PathValue("channel_id")
+	remoteIP := directIP(r.RemoteAddr)
+
+	// 全局回执 token 先于报文解析：未配置 token 时不校验（内网/网络层已隔离场景）；
+	// 一旦配置，缺失或不匹配一律 401，且不进入通道解析等任何后续逻辑。
+	if !s.receiptTokenAuthorized(r) {
+		s.deps.Logger.Warn("厂商回执鉴权失败",
+			zap.String("channel_id", channelID),
+			zap.String("remote_ip", remoteIP))
+		writeErrorJSON(w, http.StatusUnauthorized, codeUnauthorized, "回执鉴权 token 缺失或不匹配")
+		return
+	}
 
 	body, ok := readLimitedBody(w, r)
 	if !ok {
 		return
 	}
 
-	remoteIP := directIP(r.RemoteAddr)
 	result, err := s.deps.Receipts.Handle(r.Context(), channelID, body, remoteIP)
 	if err != nil {
 		if errors.Is(err, service.ErrReceiptChannelNotFound) {
@@ -220,6 +286,7 @@ func (s *Server) handleReceipt(w http.ResponseWriter, r *http.Request) {
 		zap.String("app_sms_id", result.AppSmsID),
 		zap.String("delivery_status", result.DeliveryStatus),
 		zap.Bool("matched_record", result.Found),
+		zap.Bool("applied", result.Applied),
 		zap.String("remote_ip", remoteIP))
 
 	w.Header().Set("Content-Type", jsonContentType)
@@ -250,18 +317,22 @@ func (s *Server) resolvePlaintext(raw []byte) ([]byte, error) {
 	return raw, nil
 }
 
-// probeEventType 仅做轻量探测，用于非短信事件提前放行；
-// 结构损坏时返回空串，交由严格解析产出 400。
-func probeEventType(raw []byte) string {
-	var probe struct {
-		Header struct {
-			EventType string `json:"event_type"`
-		} `json:"header"`
+// receiptTokenAuthorized 校验厂商回执的全局鉴权 token：
+// 系统未配置 token 时返回 true（兼容内网隔离部署）；配置后仅接受
+// X-Receipt-Token 头或 ?token= 查询参数中的等值 token，恒定时间比较防计时侧信道。
+func (s *Server) receiptTokenAuthorized(r *http.Request) bool {
+	want := s.deps.Settings.ReceiptAuthToken()
+	if want == "" {
+		return true
 	}
-	if err := json.Unmarshal(raw, &probe); err != nil {
-		return ""
+	got := r.Header.Get(receiptTokenHeader)
+	if got == "" {
+		got = r.URL.Query().Get("token")
 	}
-	return probe.Header.EventType
+	if got == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
 // writeAccepted 写出事件接收恒 200 响应。

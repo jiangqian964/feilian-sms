@@ -62,6 +62,49 @@ func TestCacheReloadSeesChanges(t *testing.T) {
 	}
 }
 
+func TestCacheReloadErrorHook(t *testing.T) {
+	s := openTestStore(t)
+	c, err := NewCache(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	calls := 0
+	var hookErr error
+	c.SetReloadErrorHook(func(e error) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		hookErr = e
+	})
+
+	// 正常写后重建成功：钩子不得触发
+	if _, err := s.CreateChannel(context.Background(), "c", "", `{}`, nil); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	if calls != 0 {
+		t.Fatalf("重建成功时钩子不应触发，实际 %d 次", calls)
+	}
+	mu.Unlock()
+
+	// DB 关闭后重建必然失败：手动 Reload 返回错误，写后回调路径须把错误交给钩子
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Reload(); err == nil {
+		t.Fatal("DB 关闭后 Reload 应返回错误")
+	}
+	s.onChanged() // 模拟写事务提交后的回调入口
+
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 1 || hookErr == nil {
+		t.Fatalf("重建失败时钩子应收到 1 次非空错误，实际 calls=%d err=%v", calls, hookErr)
+	}
+}
+
 func TestCacheConcurrentReadWrite(t *testing.T) {
 	s := openTestStore(t)
 	c, err := NewCache(s)

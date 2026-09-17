@@ -59,6 +59,19 @@ function render(root, s) {
     badgeInline(s.encrypt_key_set ? `已设置：${s.encrypt_key_masked}` : '未设置（本期默认不启用事件加密）',
       s.encrypt_key_set ? 'success' : 'muted'));
 
+  // 厂商回执鉴权 token：与 Encrypt Key 相同的掩码/留空不改/清空互斥语义。
+  const newReceiptTokenIn = h('input', { class: 'input', type: 'password', placeholder: '留空表示不修改（至少 16 个字符）',
+    autocomplete: 'new-password', dataset: { field: 'receipt_auth_token' }, 'aria-label': '新厂商回执鉴权 Token' });
+  const clearReceiptCb = h('input', { type: 'checkbox', dataset: { field: 'clear_receipt_auth_token' },
+    'aria-label': '清空厂商回执鉴权 Token' });
+  newReceiptTokenIn.addEventListener('input', () => { clearReceiptCb.disabled = !!newReceiptTokenIn.value; });
+  clearReceiptCb.addEventListener('change', () => { newReceiptTokenIn.disabled = clearReceiptCb.checked; });
+  if (!s.receipt_auth_token_set) clearReceiptCb.disabled = true;
+
+  const receiptTokenBadge = h('span', null,
+    badgeInline(s.receipt_auth_token_set ? `已设置：${s.receipt_auth_token_masked}` : '未设置（回执不校验 token，请确保网络层隔离）',
+      s.receipt_auth_token_set ? 'success' : 'muted'));
+
   const pathIn = h('input', { class: 'input', value: s.webhook_path, placeholder: '/feilian/sms/events',
     dataset: { field: 'webhook_path' }, 'aria-label': 'Webhook 接收路径' });
   const baseIn = h('input', { class: 'input', value: s.public_base_url, placeholder: 'http://网关IP:8080',
@@ -96,7 +109,14 @@ function render(root, s) {
           keyBadge,
           newKeyIn,
           h('label', { class: 'inline-check' }, clearKeyCb, '清空已保存的 Encrypt Key'),
-          h('span', { class: 'field-error', dataset: { errorFor: 'encrypt_key' } })))));
+          h('span', { class: 'field-error', dataset: { errorFor: 'encrypt_key' } })),
+        h('div', { class: 'field' },
+          h('label', { text: '厂商回执鉴权 Token（可选）' }),
+          receiptTokenBadge,
+          newReceiptTokenIn,
+          h('label', { class: 'inline-check' }, clearReceiptCb, '清空已保存的回执鉴权 Token'),
+          h('span', { class: 'help-text', text: '设置后厂商回执须在 X-Receipt-Token 请求头或 ?token= 参数携带等值 token；至少 16 个字符，留空表示不修改，清空后回执不校验（依赖网络层隔离）。' }),
+          h('span', { class: 'field-error', dataset: { errorFor: 'receipt_auth_token' } })))));
 
   const cardURL = h('div', { class: 'card' },
     h('div', { class: 'card-head' },
@@ -134,6 +154,8 @@ function render(root, s) {
     };
     if (newKeyIn.value) body.encrypt_key = newKeyIn.value;
     if (clearKeyCb.checked) body.clear_encrypt_key = true;
+    if (newReceiptTokenIn.value) body.receipt_auth_token = newReceiptTokenIn.value;
+    if (clearReceiptCb.checked) body.clear_receipt_auth_token = true;
 
     try {
       const next = await api.put('/api/settings', body);

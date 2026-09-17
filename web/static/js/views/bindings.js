@@ -117,6 +117,7 @@ async function load(root) {
       if (!r.template) {
         errSlot.textContent = `「${TYPE_LABELS[t]}」已选择通道但模板码为空`;
         toast('error', '保存失败：模板码不能为空', 'bindings');
+        await rollback();
         return;
       }
       let paramIndex = [];
@@ -127,6 +128,7 @@ async function load(root) {
           if (!Number.isInteger(n) || n < 0) {
             errSlot.textContent = `「${TYPE_LABELS[t]}」参数下标存在非法值：${p}`;
             toast('error', '参数下标必须为非负整数', 'bindings');
+            await rollback();
             return;
           }
           paramIndex.push(n);
@@ -143,6 +145,17 @@ async function load(root) {
       await load(root);
     } catch (err) {
       toast('error', err.message, err.field || '');
+      // 保存未生效：整表回滚为服务端权威状态，避免胶囊开关停留在乐观值。
+      await rollback();
+    }
+  }
+
+  // rollback 以服务端数据重渲染整表（开关为乐观更新，保存失败必须回滚）。
+  async function rollback() {
+    try {
+      await load(root);
+    } catch (err) {
+      toast('error', `回滚绑定状态失败：${err.message}`);
     }
   }
 }

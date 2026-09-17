@@ -13,10 +13,10 @@ func (s *Store) GetSettings(ctx context.Context) (Settings, error) {
 		ct string
 	)
 	err := s.db.QueryRowContext(ctx, `
-		SELECT feilian_verification_token, feilian_encrypt_key, webhook_path,
+		SELECT feilian_verification_token, feilian_encrypt_key, receipt_auth_token, webhook_path,
 		       public_base_url, downstream_timeout_ms, stale_pending_ms, updated_at
 		FROM system_settings WHERE id = 1`,
-	).Scan(&st.VerificationToken, &ct, &st.WebhookPath, &st.PublicBaseURL,
+	).Scan(&st.VerificationToken, &ct, &st.ReceiptAuthToken, &st.WebhookPath, &st.PublicBaseURL,
 		&st.DownstreamTimeoutMS, &st.StalePendingMS, &st.UpdatedAt)
 	if err != nil {
 		return Settings{}, fmt.Errorf("读取系统设置失败: %w", err)
@@ -54,13 +54,14 @@ func (s *Store) UpdateSettings(ctx context.Context, st Settings) error {
 		UPDATE system_settings SET
 			feilian_verification_token = ?,
 			feilian_encrypt_key = ?,
+			receipt_auth_token = ?,
 			webhook_path = ?,
 			public_base_url = ?,
 			downstream_timeout_ms = ?,
 			stale_pending_ms = ?,
 			updated_at = ?
 		WHERE id = 1`,
-		st.VerificationToken, encryptCT, st.WebhookPath, st.PublicBaseURL,
+		st.VerificationToken, encryptCT, st.ReceiptAuthToken, st.WebhookPath, st.PublicBaseURL,
 		st.DownstreamTimeoutMS, st.StalePendingMS, time.Now().UnixMilli())
 	if err != nil {
 		_ = tx.Rollback()

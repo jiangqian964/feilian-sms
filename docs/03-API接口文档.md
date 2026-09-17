@@ -13,7 +13,7 @@
 - **三类路由的可达性**：
   - Webhook（路径取系统设置，默认 `/feilian/sms/events`）、`/receipts/{channel_id}`、`GET /health`：**不经**管理端 CIDR；
   - `/api/*` 与 WebUI 静态资源：受可选管理端 CIDR 白名单约束（按直连 `RemoteAddr` 判定，忽略 `X-Forwarded-For`）；未配置白名单则不限制。
-- **鉴权**：应用层无登录；飞连来源由 `header.token`（Verification Token，恒定时间比较）校验；管理面安全边界为内网 + 可选 CIDR。
+- **鉴权**：应用层无登录；飞连来源由 `header.token`（Verification Token，恒定时间比较）校验；厂商回执在系统设置了回执鉴权 Token 时须携带 `X-Receipt-Token` 头（或 `?token=` 查询参数），恒定时间比较；管理面安全边界为内网 + 可选 CIDR。
 
 ### 1.1 统一错误响应
 
@@ -24,7 +24,7 @@
 | HTTP 状态 | code | 触发场景 |
 |---|---|---|
 | 400 | `bad_request` | JSON 非法、字段校验失败、事件报文不可解析、应解密但无 key、回执体损坏 |
-| 401 | `unauthorized` | 飞连 Verification Token 不匹配 |
+| 401 | `unauthorized` | 飞连 Verification Token 不匹配；已启用回执鉴权时回执 Token 缺失或不匹配 |
 | 403 | `forbidden` | 管理端来源不在 CIDR 白名单 |
 | 404 | `not_found` | Webhook 路径不存在、通道/记录不存在、回执通道不存在、接口不存在 |
 | 409 | `conflict` | 对已停用通道发起测试发送 |
@@ -114,8 +114,8 @@ smoke-challenge-0001
 ```
 
 处理规则：
-- `header.token` 不符 → 401，且不调用下游、不产生发送记录。
-- 非 `notify.v1.sms` 事件：记录日志后仍回 200，不调用编排层。
+- `header.token` 不符 → 401，且不调用下游、不产生发送记录（token 校验先于事件类型分流，非短信事件携带错误 token 同样返回 401）。
+- 非 `notify.v1.sms` 事件：通过 token 校验后记录日志并回 200，不做短信体校验、不调用编排层。
 - 批量 `data.events[]`：逐条处理，幂等键分别为 `event_id`（单条）或 `event_id-下标`（批量）；任一单条失败不影响其余条目与最终 200。
 - 下游成功/失败/未绑定等结果不通过 HTTP 体现，仅写入发送记录与日志。
 
@@ -175,11 +175,13 @@ smoke-challenge-0001
 ```
 
 行为：
-- 通道不存在：404 `not_found`。
+- **鉴权优先**：系统设置了「厂商回执鉴权 Token」时，请求必须携带 `X-Receipt-Token: <token>` 请求头（或等价的 `?token=<token>` 查询参数，头优先）；缺失或不匹配一律 **401** `unauthorized`，且先于请求体读取与通道查找（即使通道不存在也返回 401 而非 404，避免侧信道探测）。未配置 Token 时不校验，兼容内网/网络层隔离部署。比较采用恒定时间算法。
+- 通道不存在：404 `not_found`（仅在通过鉴权后才可能返回）。
 - 回执体不是合法 JSON 或缺少 `appSmsId` 路径：400。
-- 字段语义按通道回执配置的路径提取；`status == DELIVRD`（可配置）回写 `delivery_status=delivered`，否则 `delivery_failed`。
+- 字段语义按通道回执配置的路径提取，送达状态取**三态**：`status == DELIVRD`（成功值可配置）回写 `delivery_status=delivered`；命中配置的失败值回写 `delivery_failed`；其他状态值保持 `delivery_status` 为空（表示厂商尚未给终态），仅推进 `seq_no` 地板与 `receipt_at`。
+- 写入三重守卫：通道归属不一致（回执 `channel_id` 与记录路由不符）只裁决不落库；`seq_no` 倒退的乱序回执跳过；`delivered` 不被无更大 `seq_no` 的失败回执回退。
 - 未知 `appSmsId`：记日志（matched_record=false）但**仍回成功响应**，避免厂商重推。
-- 主发送状态不受回执改变；回执来源直连 IP 入日志。
+- 主发送状态不受回执改变；回执来源直连 IP 入日志（不读 `X-Forwarded-For`）。
 
 ---
 
@@ -191,6 +193,8 @@ smoke-challenge-0001
   "verification_token": "smoke-token-001",
   "encrypt_key_set": false,
   "encrypt_key_masked": "****",
+  "receipt_auth_token_set": false,
+  "receipt_auth_token_masked": "****",
   "webhook_path": "/feilian/sms/events",
   "webhook_url": "http://127.0.0.1:8080/feilian/sms/events",
   "public_base_url": "http://127.0.0.1:8080",
@@ -199,7 +203,7 @@ smoke-challenge-0001
   "updated_at": 1740385174000
 }
 ```
-说明：Verification Token 为普通接入参数，明文回显；Encrypt Key 仅回掩码与是否已设置；`webhook_url` 为「对外基址 + webhook 路径」拼接结果，供复制到飞连后台。
+说明：Verification Token 为普通接入参数，明文回显；Encrypt Key 与回执鉴权 Token 仅回掩码与是否已设置（未设置时掩码固定为 `****`）；`webhook_url` 为「对外基址 + webhook 路径」拼接结果，供复制到飞连后台。
 
 ### PUT /api/settings → 200（回显同 GET）
 请求体字段均为可选（缺省=不修改，读改写合并）：
@@ -208,6 +212,8 @@ smoke-challenge-0001
   "verification_token": "new-token",
   "encrypt_key": "",
   "clear_encrypt_key": false,
+  "receipt_auth_token": "",
+  "clear_receipt_auth_token": false,
   "webhook_path": "/feilian/sms/events",
   "public_base_url": "http://10.0.0.10:8080",
   "downstream_timeout_ms": 2000,
@@ -217,13 +223,14 @@ smoke-challenge-0001
 
 | 字段 | 校验 |
 |---|---|
-| `webhook_path` | 必须以 `/` 开头、非空、不含空白 |
+| `webhook_path` | 必须以 `/` 开头、非空、不含空白与 `?`/`#`；不得占用 `/api`、`/api/`、`/receipts`、`/receipts/`、`/health` 保留前缀 |
 | `public_base_url` | 空或合法 http(s) URL（须有 host） |
 | `downstream_timeout_ms` | 100 ~ 60000 |
 | `stale_pending_ms` | 1000 ~ 86400000 |
 | `encrypt_key` / `clear_encrypt_key` | 二者不可同时提供；空串 encrypt_key=不修改；`clear_encrypt_key=true` 清空 |
+| `receipt_auth_token` / `clear_receipt_auth_token` | 二者不可同时提供；空串 receipt_auth_token=不修改；长度至少 16 个字符且不得含空白；`clear_receipt_auth_token=true` 清空（清空后回执端点不再校验） |
 
-保存成功后下一条请求即生效（token、webhook 路径、超时均热生效）。
+保存成功后下一条请求即生效（token、webhook 路径、超时、回执鉴权均热生效）。
 
 ---
 
@@ -431,11 +438,12 @@ Query 参数：
   "receipt_at": 1789376372000,
   "error_kind": "",
   "latency_ms": 5,
+  "attempts": 0,
   "created_at": 1789376371000,
   "updated_at": 1789376372000
 }
 ```
-不存在返回 404。字段说明见 [04 · 数据库设计文档](./04-数据库设计文档.md) 第 3.5 节；手机号/参数在库中即脱敏形态。
+不存在返回 404。字段说明见 [04 · 数据库设计文档](./04-数据库设计文档.md) 第 3.5 节；手机号/参数在库中即脱敏形态。`attempts` 为补发认领次数（首次下发不计，上限 3 次）。
 
 ---
 
@@ -444,9 +452,9 @@ Query 参数：
 | 枚举 | 取值 |
 |---|---|
 | 主状态 `status` | `pending` / `success` / `failed`（终态不可逆） |
-| 回执状态 `delivery_status` | `delivered` / `delivery_failed`（空表示尚无回执） |
+| 回执状态 `delivery_status` | `delivered` / `delivery_failed`（空表示尚无回执，或厂商状态既非成功值也非失败值） |
 | 来源 `source` | `feilian` / `test` |
-| 失败分类 `error_kind` | `unbound`（未绑定）、`binding_disabled`（绑定停用）、`channel_disabled`（通道停用）、`channel_not_found`（通道缺失）、`invalid_mobile`（号码无法归一化）、`render`（映射/签名/参数渲染失败）、`vendor`（2xx 业务拒绝）、`network`（连接/DNS/非 2xx）、`timeout`（下游超时）、`internal`（内部错误） |
+| 失败分类 `error_kind` | `unbound`（未绑定）、`binding_disabled`（绑定停用）、`channel_disabled`（通道停用）、`channel_not_found`（通道缺失）、`invalid_mobile`（号码无法归一化）、`render`（映射/签名/参数渲染失败）、`vendor`（2xx 业务拒绝）、`network`（连接/DNS/非 2xx）、`timeout`（下游超时）、`resend_exhausted`（传输类失败经最多 3 次补发仍未确认）、`internal`（内部错误） |
 
 ---
 

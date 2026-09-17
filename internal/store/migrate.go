@@ -83,6 +83,18 @@ var migrations = []migration{
 			`CREATE INDEX IF NOT EXISTS idx_sms_send_channel ON sms_send(channel_id, created_at)`,
 		},
 	},
+	{
+		version: 3,
+		stmts: []string{
+			// attempts：补发认领次数（每次 ClaimStalePending 原子 +1），用于补发上限保护。
+			`ALTER TABLE sms_send ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0`,
+			// payload_enc：原始短信对象（feilian.SMSObject JSON）经数据密钥加密后的密文，
+			// 仅供补发 worker 解密重放；不进入列表查询，也不经过任何管理 API 回显。
+			`ALTER TABLE sms_send ADD COLUMN payload_enc TEXT NOT NULL DEFAULT ''`,
+			// receipt_auth_token：厂商异步回执的可选共享密钥（空=不校验，保持默认开放）。
+			`ALTER TABLE system_settings ADD COLUMN receipt_auth_token TEXT NOT NULL DEFAULT ''`,
+		},
+	},
 }
 
 func (s *Store) migrate(ctx context.Context) error {

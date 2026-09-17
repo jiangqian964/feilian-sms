@@ -232,6 +232,41 @@ func TestTokenEqual(t *testing.T) {
 	}
 }
 
+func TestParseEventHeader(t *testing.T) {
+	// 非短信事件：object 为任意结构，头部仍可被轻量解析（不触发短信校验）。
+	other := `{"schema":"1.0","header":{"event_id":"evt-x","token":"tok",
+"event_type":"device.v1.thing","app_id":"app"},"data":{"events":[{"object":{"foo":1}}]}}`
+	h, err := ParseEventHeader([]byte(other))
+	if err != nil {
+		t.Fatalf("非短信事件头部解析失败: %v", err)
+	}
+	if h.Header.Token != "tok" || h.Header.EventType != "device.v1.thing" || h.Header.EventID != "evt-x" {
+		t.Fatalf("头部字段异常: %+v", h.Header)
+	}
+	// 正常短信信封头部同样可解析。
+	h, err = ParseEventHeader([]byte(codeEnvelope))
+	if err != nil {
+		t.Fatalf("短信事件头部解析失败: %v", err)
+	}
+	if h.Header.EventType != "notify.v1.sms" || h.Header.Token != "vt-abc" {
+		t.Fatalf("头部字段异常: %+v", h.Header)
+	}
+
+	cases := map[string]string{
+		"空体":            ``,
+		"坏 JSON":        `{bad`,
+		"缺少 schema":     `{"header":{"token":"t","event_type":"x"}}`,
+		"不支持 schema":    `{"schema":"2.0","header":{"token":"t","event_type":"x"}}`,
+		"缺少 token":      `{"schema":"1.0","header":{"event_type":"x"}}`,
+		"缺少 event_type": `{"schema":"1.0","header":{"token":"t"}}`,
+	}
+	for name, body := range cases {
+		if _, err := ParseEventHeader([]byte(body)); err == nil {
+			t.Fatalf("%s：应返回错误", name)
+		}
+	}
+}
+
 func cloneMap(m map[string]any) map[string]any {
 	b, _ := json.Marshal(m)
 	var out map[string]any

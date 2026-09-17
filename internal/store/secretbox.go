@@ -63,3 +63,19 @@ func Decrypt(key []byte, encoded string) ([]byte, error) {
 	}
 	return plaintext, nil
 }
+
+// SealPayload 用数据密钥加密补发所需的原始短信对象；空明文返回空串。
+func (s *Store) SealPayload(plaintext []byte) (string, error) {
+	if len(plaintext) == 0 {
+		return "", nil
+	}
+	return Encrypt(s.dataKey, plaintext)
+}
+
+// OpenPayload 解密 SealPayload 的产物；空密文返回 nil（历史行无载荷）。
+func (s *Store) OpenPayload(encoded string) ([]byte, error) {
+	if encoded == "" {
+		return nil, nil
+	}
+	return Decrypt(s.dataKey, encoded)
+}

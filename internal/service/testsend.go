@@ -17,6 +17,7 @@ import (
 type TestSendResult struct {
 	AppSmsID      string `json:"app_sms_id"`
 	Success       bool   `json:"success"`
+	Pending       bool   `json:"pending"` // 结果不确定（超时/5xx/429/传输错误），记录保 pending 待补发
 	HTTPCode      int    `json:"http_code"`
 	ErrorKind     string `json:"error_kind,omitempty"`
 	ProviderMsgID string `json:"provider_msg_id,omitempty"`
@@ -29,7 +30,10 @@ var ErrChannelDisabled = errors.New("通道已停用")
 // TestSend 从管理端直接对指定通道下发一条测试短信：
 // appSmsId=test-<unixms>-<rand>，source=test 全程留痕，同步返回投递结果。
 // 通道不存在或停用时直接返回错误（不落记录，供页面即时报错）。
-func (f *ForwardService) TestSend(ctx context.Context, channelID, templateCode string, o feilian.SMSObject) (*TestSendResult, error) {
+// 与实时事件一致：入站 ctx 仅用于函数签名，DB/下发动作绑定服务自持 bgCtx，
+// 管理端关闭页面不取消在途下发；超时/5xx/429/传输错误等不确定结果保 pending，
+// 由补发 worker 兜底（测试短信也遵循 at-least-once）。
+func (f *ForwardService) TestSend(_ context.Context, channelID, templateCode string, o feilian.SMSObject) (*TestSendResult, error) {
 	snap := f.cache.Current()
 
 	var rc *store.RuntimeChannel
@@ -62,64 +66,81 @@ func (f *ForwardService) TestSend(ctx context.Context, channelID, templateCode s
 		Params:       o.Params,
 	}
 
-	rec := store.SendRecord{
-		AppSmsID:     appSmsID,
-		Source:       store.SourceTest,
-		ChannelID:    channelID,
-		SMSType:      o.SMSType,
-		MobileMasked: store.MaskSecret(o.MobileNumber),
-		ParamsMasked: maskParams(o.Params),
-		TemplateCode: templateCode,
-		Status:       store.StatusPending,
-		CreatedAt:    now,
-		UpdatedAt:    now,
+	// 原始对象同样加密落库：不确定结果保 pending 后可被补发 worker 解密重放。
+	payloadCT, err := f.sealObject(o)
+	if err != nil {
+		return nil, err
 	}
-	if _, _, err := f.store.InsertPendingIfAbsent(ctx, rec); err != nil {
+	rec := store.SendRecord{
+		AppSmsID:         appSmsID,
+		Source:           store.SourceTest,
+		ChannelID:        channelID,
+		SMSType:          o.SMSType,
+		MobileMasked:     store.MaskSecret(o.MobileNumber),
+		ParamsMasked:     maskParams(o.Params),
+		TemplateCode:     templateCode,
+		Status:           store.StatusPending,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+		EncryptedPayload: payloadCT,
+	}
+	if _, _, err := f.store.InsertPendingIfAbsent(f.bgCtx, rec); err != nil {
 		return nil, err
 	}
 
-	// 渲染阶段失败（号码/配置）同样留痕并同步返回。
+	// 渲染阶段失败（号码/配置）是确定性失败：留终态并同步返回。
 	rendered, err := cfg.Render(rc.Secrets, in)
 	if err != nil {
 		kind := store.ErrorKindRender
 		if errors.Is(err, channel.ErrInvalidMobile) {
 			kind = store.ErrorKindInvalidMobile
 		}
-		f.markFailed(ctx, appSmsID, kind, "", err.Error(), 0, now)
+		f.markFailed(appSmsID, kind, "", err.Error(), 0, now)
 		return &TestSendResult{AppSmsID: appSmsID, Success: false, ErrorKind: kind, Message: err.Error()}, nil
 	}
 
-	sendCtx, cancel := context.WithTimeout(ctx, timeoutDuration(snap.Settings.DownstreamTimeoutMS))
+	sendCtx, cancel := context.WithTimeout(f.bgCtx, timeoutDuration(snap.Settings.DownstreamTimeoutMS))
 	defer cancel()
 	start := f.now()
 	res, err := f.sender.Do(sendCtx, cfg, rendered)
 	latency := f.now() - start
 	if err != nil {
+		// 传输层任何错误都可能已被厂商受理：保 pending 交补发兜底，不置失败终态。
 		kind := store.ErrorKindNetwork
 		var te *channel.TransportError
 		if errors.As(err, &te) && te.Timeout {
 			kind = store.ErrorKindTimeout
 		}
-		f.markFailed(ctx, appSmsID, kind, "", err.Error(), latency, f.now())
-		return &TestSendResult{AppSmsID: appSmsID, Success: false, ErrorKind: kind, Message: err.Error()}, nil
+		return &TestSendResult{AppSmsID: appSmsID, Success: false, Pending: true,
+			ErrorKind: kind, Message: err.Error()}, nil
 	}
 
 	if res.Success {
-		_ = f.store.MarkSuccess(ctx, appSmsID, store.MarkSuccess{
+		if mErr := f.markSuccess(appSmsID, store.MarkSuccess{
 			ProviderMsgID: res.VendorID, ProviderStatus: strconv.Itoa(res.HTTPCode),
 			ProviderMessage: res.Message, LatencyMS: latency, NowMS: f.now(),
-		})
+		}); mErr != nil {
+			return nil, mErr
+		}
 		return &TestSendResult{AppSmsID: appSmsID, Success: true, HTTPCode: res.HTTPCode,
 			ProviderMsgID: res.VendorID, Message: res.Message}, nil
 	}
 
-	kind := store.ErrorKindVendor
-	if res.HTTPCode < 200 || res.HTTPCode >= 300 {
-		kind = store.ErrorKindNetwork
+	// 4xx（429 除外）是确定性拒绝；2xx 业务拒绝为厂商终态；5xx/429 结果不确定保 pending。
+	if isDefiniteHTTPReject(res.HTTPCode) {
+		kind := store.ErrorKindNetwork
+		f.markFailed(appSmsID, kind, strconv.Itoa(res.HTTPCode), res.Message, latency, f.now())
+		return &TestSendResult{AppSmsID: appSmsID, Success: false, HTTPCode: res.HTTPCode,
+			ErrorKind: kind, Message: res.Message}, nil
 	}
-	f.markFailed(ctx, appSmsID, kind, strconv.Itoa(res.HTTPCode), res.Message, latency, f.now())
-	return &TestSendResult{AppSmsID: appSmsID, Success: false, HTTPCode: res.HTTPCode,
-		ErrorKind: kind, Message: res.Message}, nil
+	if res.HTTPCode >= 200 && res.HTTPCode < 300 {
+		kind := store.ErrorKindVendor
+		f.markFailed(appSmsID, kind, strconv.Itoa(res.HTTPCode), res.Message, latency, f.now())
+		return &TestSendResult{AppSmsID: appSmsID, Success: false, HTTPCode: res.HTTPCode,
+			ErrorKind: kind, Message: res.Message}, nil
+	}
+	return &TestSendResult{AppSmsID: appSmsID, Success: false, Pending: true,
+		HTTPCode: res.HTTPCode, ErrorKind: store.ErrorKindNetwork, Message: res.Message}, nil
 }
 
 func randomSuffix() string {

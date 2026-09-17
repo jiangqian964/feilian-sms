@@ -2,10 +2,13 @@ package service
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
 	"feilian-sms/internal/channel"
+	"feilian-sms/internal/feilian"
 	"feilian-sms/internal/store"
 )
 
@@ -61,6 +64,54 @@ func TestTestSendVendorFailure(t *testing.T) {
 	}
 	if res.Success || res.ErrorKind != store.ErrorKindVendor {
 		t.Fatalf("应返回失败分类: %+v", res)
+	}
+}
+
+// TestTestSendIndeterminateKeepsPending 超时等不确定结果必须保 pending，
+// 由补发 worker 兜底，不得向 WebUI 谎报确定性失败。
+func TestTestSendIndeterminateKeepsPending(t *testing.T) {
+	s, st, _ := newSvc(t, 1_000_000)
+	chID := createChannel(t, st, "demo", true)
+	s.sender = &fakeSender{err: &channel.TransportError{Timeout: true, Err: errors.New("context deadline exceeded")}}
+
+	res, err := s.TestSend(context.Background(), chID, "T", obj("code", "13800001111", "1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Success || !res.Pending || res.ErrorKind != store.ErrorKindTimeout {
+		t.Fatalf("超时测试发送应保 pending: %+v", res)
+	}
+	rec, _ := st.GetSend(context.Background(), res.AppSmsID)
+	if rec.Status != store.StatusPending {
+		t.Fatalf("记录应停留 pending: %#v", rec)
+	}
+}
+
+// TestTestSendPayloadStored 测试发送同样留存加密载荷，供 worker 补发。
+func TestTestSendPayloadStored(t *testing.T) {
+	s, st, _ := newSvc(t, 1_000_000)
+	chID := createChannel(t, st, "demo", true)
+	in := obj("code", "13800001111", "654321")
+
+	res, err := s.TestSend(context.Background(), chID, "SMS_CODE", in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ct, err := st.GetSendPayload(context.Background(), res.AppSmsID)
+	if err != nil || ct == "" {
+		t.Fatalf("测试发送应留存加密载荷: ct=%q err=%v", ct, err)
+	}
+	plain, err := st.OpenPayload(ct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got feilian.SMSObject
+	if err := json.Unmarshal(plain, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.MobileNumber != in.MobileNumber || got.SMSType != in.SMSType ||
+		len(got.Params) != 1 || got.Params[0] != "654321" {
+		t.Fatalf("载荷与原始对象不一致: %#v", got)
 	}
 }
 

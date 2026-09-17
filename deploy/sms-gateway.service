@@ -16,10 +16,11 @@ EnvironmentFile=-/etc/sms-gateway/sms-gateway.env
 
 ExecStart=/usr/local/bin/sms-gateway --config /etc/sms-gateway/config.yaml
 
-# 崩溃自动拉起；优雅退出由进程内 SIGTERM 5 秒 Shutdown 完成。
+# 崩溃自动拉起；优雅退出由进程内 SIGTERM 10 秒 Shutdown 完成
+# （接入层 6s 排空在途请求 + 后台补发服务 4s 退出），systemd 超时留足余量。
 Restart=on-failure
 RestartSec=5
-TimeoutStopSec=10
+TimeoutStopSec=15
 
 # 日志统一交 journald：journalctl -u sms-gateway -f
 StandardOutput=journal

@@ -213,15 +213,21 @@ func (s *Server) updateChannel(w http.ResponseWriter, r *http.Request) {
 	if req.Enabled != nil {
 		updated.Enabled = *req.Enabled
 	}
-	if err := s.deps.Store.UpdateChannel(r.Context(), updated); err != nil {
-		s.failInternal(w, r, "更新通道失败", err)
-		return
+	// 收集新配置声明的全部 secret 常量名：单事务内更新配置、全量替换密钥，
+	// 并删除已不再声明的孤儿密文（改名/取消密钥后旧密文不得残留或被同名常量复活）。
+	declared := make([]string, 0, len(cfg.Constants))
+	for name, spec := range cfg.Constants {
+		if spec.Secret {
+			declared = append(declared, name)
+		}
 	}
-	if len(cleanSecrets) > 0 {
-		if err := s.deps.Store.PutChannelSecrets(r.Context(), existing.ID, cleanSecrets); err != nil {
-			s.failInternal(w, r, "写入通道密钥失败", err)
+	if err := s.deps.Store.ReplaceChannelConfig(r.Context(), updated, merged, declared); err != nil {
+		if isStoreNotFound(err) {
+			writeErrorJSON(w, http.StatusNotFound, codeNotFound, "通道不存在")
 			return
 		}
+		s.failInternal(w, r, "更新通道失败", err)
+		return
 	}
 	s.respondChannel(w, r, http.StatusOK, updated)
 }
@@ -287,9 +293,12 @@ func (s *Server) testChannel(w http.ResponseWriter, r *http.Request) {
 		if result.ErrorKind != "" {
 			fields = append(fields, zap.String("error_kind", result.ErrorKind))
 		}
-		if result.Success {
+		switch {
+		case result.Success:
 			s.deps.Logger.Info("测试发送成功", fields...)
-		} else {
+		case result.Pending:
+			s.deps.Logger.Info("测试发送结果不确定，已转补发队列", fields...)
+		default:
 			s.deps.Logger.Warn("测试发送失败", fields...)
 		}
 		writeJSON(w, result)

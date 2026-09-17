@@ -61,11 +61,14 @@ type ResponseConfig struct {
 }
 
 // ReceiptConfig 厂商异步回执映射（POST JSON）。
+// 状态三态：status==DeliveredValue→delivered；==FailureValue→delivery_failed；
+// 其余取值（排队中/发送中等中间态）保持既有送达状态不变，仅推进 seq_no。
 type ReceiptConfig struct {
 	MsgIDPath      string `json:"msg_id_path"`     // 厂商短信 ID 字段，如 smsId
 	AppMsgIDPath   string `json:"app_msg_id_path"` // 我方 appSmsId 回传字段，如 appSmsId
 	StatusPath     string `json:"status_path"`     // 回执状态字段，如 status
 	DeliveredValue string `json:"delivered_value"` // 送达成功值，如 DELIVRD
+	FailureValue   string `json:"failure_value"`   // 送达失败值，如 UNDELIV；空=不识别失败态
 	MessagePath    string `json:"message_path"`    // 回执描述字段
 	SeqNoPath      string `json:"seq_no_path"`     // 回执序号字段，如 seqNo
 	SuccessBody    string `json:"success_body"`    // 回执成功响应原文；空=内置默认 {"status":0,"message":"success"}

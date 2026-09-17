@@ -28,10 +28,11 @@ const defaultReceiptAck = `{"status":0,"message":"success"}`
 // ReceiptResult 是一次回执处理结果；ResponseBody 必须原样回给厂商。
 type ReceiptResult struct {
 	Found          bool   // 我方是否有对应 appSmsId 记录（false 仅记日志，仍回成功）
+	Applied        bool   // 回写是否真正落库（跨通道/乱序/状态回退时为 false）
 	AppSmsID       string // 我方消息 ID
 	VendorMsgID    string // 厂商消息 ID
 	Delivered      bool   // 是否命中送达成功值
-	DeliveryStatus string // delivered / delivery_failed
+	DeliveryStatus string // delivered / delivery_failed / 空（排队中等中间态，不覆盖既有状态）
 	ResponseBody   []byte // 回给厂商的成功响应
 	RemoteIP       string // 回执来源（直连 RemoteAddr，供日志留痕）
 }
@@ -85,14 +86,22 @@ func (s *ReceiptService) Handle(ctx context.Context, channelID string, body []by
 	message, _ := mapping.GetString(decoded, rcpt.MessagePath)
 	seqNo := extractSeqNo(decoded, rcpt.SeqNoPath)
 
+	// 三态归一化：仅命中配置的成功值/失败值才落对应终态；排队中、发送中等
+	// 中间态（或通道未配置失败值）保持 delivery_status 为空，store 层只推进 seq_no，
+	// 绝不能把「未知状态」当成送达失败（旧实现的二态误判）。
 	delivered := statusOK && rcpt.DeliveredValue != "" && statusVal == rcpt.DeliveredValue
-	deliveryStatus := deliveryFailed
-	if delivered {
+	matchedFailure := statusOK && rcpt.FailureValue != "" && statusVal == rcpt.FailureValue
+	var deliveryStatus string
+	switch {
+	case delivered:
 		deliveryStatus = deliveryDelivered
+	case matchedFailure:
+		deliveryStatus = deliveryFailed
 	}
 
-	found, err := s.store.ApplyReceipt(ctx, store.ReceiptUpdate{
+	applied, err := s.store.ApplyReceipt(ctx, store.ReceiptUpdate{
 		AppSmsID:        appSmsID,
+		ChannelID:       channelID,
 		DeliveryStatus:  deliveryStatus,
 		DeliveryMessage: message,
 		SeqNo:           seqNo,
@@ -103,7 +112,8 @@ func (s *ReceiptService) Handle(ctx context.Context, channelID string, body []by
 	}
 
 	return &ReceiptResult{
-		Found:          found,
+		Found:          applied.Found,
+		Applied:        applied.Applied,
 		AppSmsID:       appSmsID,
 		VendorMsgID:    vendorMsgID,
 		Delivered:      delivered,

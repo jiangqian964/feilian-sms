@@ -133,6 +133,24 @@ func splitPath(p string) ([]string, error) {
 	return strings.Split(p, "."), nil
 }
 
+// maxArrayIndex 是 target 路径中数组下标的硬上限。
+// 没有上限时，list.2147483647.x 这类配置在「试渲染/保存」阶段就会
+// make 出数 GiB 切片（500 万元素约 76MiB，21 亿下标约 32GiB），
+// 仅保存配置即可把进程 OOM 杀掉。短信报文不存在上万元素的数组合法诉求。
+const maxArrayIndex = 10000
+
+// parseIndex 校验路径数字段：非负整数且不超过硬上限，避免 make 巨型切片导致 OOM。
+func parseIndex(seg string) (int, error) {
+	idx, err := strconv.Atoi(seg)
+	if err != nil || idx < 0 {
+		return 0, fmt.Errorf("数组下标必须是非负整数，实际 %q", seg)
+	}
+	if idx > maxArrayIndex {
+		return 0, fmt.Errorf("数组下标 %d 超过上限 %d（请检查 target 路径配置）", idx, maxArrayIndex)
+	}
+	return idx, nil
+}
+
 // assignPath 按段写入；对象用 map，全数字段用 slice 自动扩容。
 func assignPath(root map[string]any, segs []string, val any) error {
 	var (
@@ -158,16 +176,18 @@ func assignPath(root map[string]any, segs []string, val any) error {
 			}
 			cur = next
 		case []any:
-			idx, err := strconv.Atoi(seg)
-			if err != nil || idx < 0 {
-				return fmt.Errorf("数组下标必须是非负整数，实际 %q", seg)
+			idx, err := parseIndex(seg)
+			if err != nil {
+				return err
 			}
 			if last {
 				if idx >= len(container) {
 					grown := make([]any, idx+1)
 					copy(grown, container)
+					if err := setBack(root, segs[:i], grown); err != nil {
+						return err
+					}
 					container = grown
-					setBack(root, segs[:i], container)
 				}
 				if isContainer(container[idx]) {
 					return fmt.Errorf("下标 %d 已是对象/数组，不能再赋标量", idx)
@@ -178,8 +198,10 @@ func assignPath(root map[string]any, segs []string, val any) error {
 			if idx >= len(container) {
 				grown := make([]any, idx+1)
 				copy(grown, container)
+				if err := setBack(root, segs[:i], grown); err != nil {
+					return err
+				}
 				container = grown
-				setBack(root, segs[:i], container)
 			}
 			if container[idx] == nil {
 				container[idx] = newContainer(segs[i+1])
@@ -195,23 +217,41 @@ func assignPath(root map[string]any, segs []string, val any) error {
 }
 
 // setBack 在切片扩容后把新切片挂回父节点（根场景除外）。
-func setBack(root map[string]any, parentSegs []string, grown []any) {
+// 父链本身可能交替包含对象与数组（如 a.0.b.1 扩容），逐段做类型判定，
+// 旧实现无条件按 map 强转，遇到切片父节点直接 panic。
+func setBack(root map[string]any, parentSegs []string, grown []any) error {
 	if len(parentSegs) == 0 {
-		return
+		return nil
 	}
 	cur := any(root)
 	for i, seg := range parentSegs {
-		m := cur.(map[string]any)
-		if i == len(parentSegs)-1 {
-			m[seg] = grown
-			return
+		last := i == len(parentSegs)-1
+		switch node := cur.(type) {
+		case map[string]any:
+			if last {
+				node[seg] = grown
+				return nil
+			}
+			cur = node[seg]
+		case []any:
+			idx, err := parseIndex(seg)
+			if err != nil {
+				return err
+			}
+			if idx >= len(node) {
+				// 内部不变量破坏：父链由 assignPath 刚构建，下标必然在界内。
+				return fmt.Errorf("内部错误：父数组下标 %d 越界（len=%d）", idx, len(node))
+			}
+			if last {
+				node[idx] = grown
+				return nil
+			}
+			cur = node[idx]
+		default:
+			return fmt.Errorf("内部错误：父路径段 %s 既不是对象也不是数组", seg)
 		}
-		if child, ok := m[seg].([]any); ok {
-			cur = child
-			continue
-		}
-		cur = m[seg]
 	}
+	return nil
 }
 
 func newContainer(nextSeg string) any {

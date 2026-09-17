@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"feilian-sms/internal/channel"
 	"feilian-sms/internal/feilian"
@@ -20,13 +22,19 @@ type fakeSender struct {
 	bodies []map[string]any
 	result *channel.SendResult
 	err    error
+	// gate 非空时，Do 在记录调用后阻塞直到该 channel 关闭，用于制造并发窗口。
+	gate <-chan struct{}
 }
 
 func (f *fakeSender) Do(_ context.Context, _ *channel.Config, r *channel.RenderResult) (*channel.SendResult, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.calls++
 	f.bodies = append(f.bodies, r.Body)
+	gate := f.gate
+	f.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -176,6 +184,10 @@ func TestForwardStaleRetry(t *testing.T) {
 	if r.Succeeded != 1 || fk.callCount() != 1 {
 		t.Fatalf("stale pending 应补发: %+v calls=%d", r, fk.callCount())
 	}
+	// CAS 续发应令 attempts+1（不计首次下发）。
+	if rec, _ := st.GetSend(context.Background(), "evt-stale"); rec.Attempts != 1 {
+		t.Fatalf("stale 续发后 attempts 应为 1，实际 %d", rec.Attempts)
+	}
 
 	// 一条 fresh pending（在阈值内），应视为在途跳过
 	_, _, _ = st.InsertPendingIfAbsent(context.Background(), store.SendRecord{
@@ -293,7 +305,7 @@ func TestForwardVendorAndTransportFailures(t *testing.T) {
 	const now int64 = 1_000_000
 	objects := []feilian.SMSObject{obj("code", "13800001111", "1")}
 
-	// 2xx 但业务失败 → vendor
+	// 2xx 但业务失败 → vendor（确定性终态）
 	s, st, _ := newSvc(t, now)
 	chID := createChannel(t, st, "demo", true)
 	bind(t, st, "code", chID, "T", nil, true)
@@ -301,29 +313,64 @@ func TestForwardVendorAndTransportFailures(t *testing.T) {
 	r := s.HandleEvent(context.Background(), "e-vendor", objects)
 	assertKind(t, st, r, "e-vendor", store.ErrorKindVendor)
 
-	// 5xx → network
+	// 4xx（429 除外）→ network 确定性终态
+	s, st, _ = newSvc(t, now)
+	chID = createChannel(t, st, "demo", true)
+	bind(t, st, "code", chID, "T", nil, true)
+	s.sender = &fakeSender{result: &channel.SendResult{Success: false, HTTPCode: 400, Message: "bad request"}}
+	r = s.HandleEvent(context.Background(), "e-4xx", objects)
+	assertKind(t, st, r, "e-4xx", store.ErrorKindNetwork)
+
+	// 5xx → 结果不确定，保 pending（厂商可能已受理），条目分类 network
 	s, st, _ = newSvc(t, now)
 	chID = createChannel(t, st, "demo", true)
 	bind(t, st, "code", chID, "T", nil, true)
 	s.sender = &fakeSender{result: &channel.SendResult{Success: false, HTTPCode: 502, Message: "bad gateway"}}
 	r = s.HandleEvent(context.Background(), "e-5xx", objects)
-	assertKind(t, st, r, "e-5xx", store.ErrorKindNetwork)
+	assertPendingItem(t, st, r, "e-5xx", store.ErrorKindNetwork)
 
-	// 超时 → timeout
+	// 429 限流 → 保 pending
+	s, st, _ = newSvc(t, now)
+	chID = createChannel(t, st, "demo", true)
+	bind(t, st, "code", chID, "T", nil, true)
+	s.sender = &fakeSender{result: &channel.SendResult{Success: false, HTTPCode: 429, Message: "rate limited"}}
+	r = s.HandleEvent(context.Background(), "e-429", objects)
+	assertPendingItem(t, st, r, "e-429", store.ErrorKindNetwork)
+
+	// 超时 → 保 pending，条目分类 timeout
 	s, st, _ = newSvc(t, now)
 	chID = createChannel(t, st, "demo", true)
 	bind(t, st, "code", chID, "T", nil, true)
 	s.sender = &fakeSender{err: &channel.TransportError{Timeout: true, Err: errors.New("context deadline exceeded")}}
 	r = s.HandleEvent(context.Background(), "e-timeout", objects)
-	assertKind(t, st, r, "e-timeout", store.ErrorKindTimeout)
+	assertPendingItem(t, st, r, "e-timeout", store.ErrorKindTimeout)
 
-	// 普通传输错误 → network
+	// 普通传输错误（连接拒绝）→ 保 pending，条目分类 network
 	s, st, _ = newSvc(t, now)
 	chID = createChannel(t, st, "demo", true)
 	bind(t, st, "code", chID, "T", nil, true)
 	s.sender = &fakeSender{err: &channel.TransportError{Err: errors.New("connection refused")}}
 	r = s.HandleEvent(context.Background(), "e-net", objects)
-	assertKind(t, st, r, "e-net", store.ErrorKindNetwork)
+	assertPendingItem(t, st, r, "e-net", store.ErrorKindNetwork)
+}
+
+// assertPendingItem 断言不确定结果：批次 Pending=1、Failed=0，记录停留 pending
+// （不得写失败终态/失败分类），且条目携带预期分类供日志排查。
+func assertPendingItem(t *testing.T, st *store.Store, r *ForwardResult, appSmsID, itemKind string) {
+	t.Helper()
+	if r.Pending != 1 || r.Failed != 0 || len(r.Items) != 1 {
+		t.Fatalf("[%s] 应保 pending 1 条: %+v", itemKind, r)
+	}
+	if r.Items[0].ErrorKind != itemKind {
+		t.Fatalf("[%s] 条目分类应为 %s，实际 %q", itemKind, itemKind, r.Items[0].ErrorKind)
+	}
+	rec, err := st.GetSend(context.Background(), appSmsID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Status != store.StatusPending {
+		t.Fatalf("[%s] 记录必须停留 pending，实际 %s/%s", itemKind, rec.Status, rec.ErrorKind)
+	}
 }
 
 func assertKind(t *testing.T, st *store.Store, r *ForwardResult, appSmsID, kind string) {
@@ -337,5 +384,114 @@ func assertKind(t *testing.T, st *store.Store, r *ForwardResult, appSmsID, kind 
 	}
 	if rec.ErrorKind != kind || rec.Status != store.StatusFailed {
 		t.Fatalf("[%s] 分类错误: %#v", kind, rec)
+	}
+}
+
+// waitUntil 轮询条件直至成立或超时（仅用于测试并发屏障，避免硬性 sleep）。
+func waitUntil(t *testing.T, timeout time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("等待并发条件成立超时")
+}
+
+// TestForwardConcurrentSameAppSmsIDSingleDispatch 回归 #1：同一 appSmsId 的
+// 高并发重复事件必须只有一个请求真正下发（「先插后发」原子幂等闸门）。
+func TestForwardConcurrentSameAppSmsIDSingleDispatch(t *testing.T) {
+	s, st, fk := newSvc(t, 1_000_000)
+	chID := createChannel(t, st, "demo", true)
+	bind(t, st, "code", chID, "T", nil, true)
+
+	gate := make(chan struct{})
+	fk.gate = gate
+	const n = 16
+	var done int32
+	var wg sync.WaitGroup
+	objects := []feilian.SMSObject{obj("code", "13800001111", "1")}
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.HandleEvent(context.Background(), "evt-race", objects)
+			atomic.AddInt32(&done, 1)
+		}()
+	}
+
+	// 赢者阻塞在厂商调用上；等待其余 15 个竞争请求全部判定完毕。
+	waitUntil(t, 3*time.Second, func() bool { return atomic.LoadInt32(&done) == n-1 })
+	if c := fk.callCount(); c != 1 {
+		close(gate)
+		t.Fatalf("并发窗口内仅允许 1 次下发，实际 %d", c)
+	}
+	close(gate)
+	wg.Wait()
+
+	if fk.callCount() != 1 {
+		t.Fatalf("同 appSmsId 并发必须只下发 1 次，实际 %d", fk.callCount())
+	}
+	rec, err := st.GetSend(context.Background(), "evt-race")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Status != store.StatusSuccess {
+		t.Fatalf("唯一下发成功后记录应为 success: %#v", rec)
+	}
+}
+
+// TestForwardResendExhausted 回归补发上限：首次下发 + 最多 3 次 stale 续发后，
+// 仍未确认的记录置 resend_exhausted 终态，且终态裁决本身不再调用厂商。
+func TestForwardResendExhausted(t *testing.T) {
+	var clock int64 = 1_000_000
+	s, st, fk := newSvc(t, clock)
+	s.now = func() int64 { return clock }
+	chID := createChannel(t, st, "demo", true)
+	bind(t, st, "code", chID, "T", nil, true)
+	fk.err = &channel.TransportError{Timeout: true, Err: errors.New("context deadline exceeded")}
+	objects := []feilian.SMSObject{obj("code", "13800001111", "1")}
+
+	// 首次下发即超时 → pending（1 次厂商调用，attempts=0）。
+	r := s.HandleEvent(context.Background(), "evt-exh", objects)
+	assertPendingItem(t, st, r, "evt-exh", store.ErrorKindTimeout)
+
+	// 每轮推进超过 stale 阈值后重推：CAS 续发 3 次。
+	for i := 1; i <= maxResendAttempts; i++ {
+		clock += 120_001
+		r = s.HandleEvent(context.Background(), "evt-exh", objects)
+		assertPendingItem(t, st, r, "evt-exh", store.ErrorKindTimeout)
+		rec, _ := st.GetSend(context.Background(), "evt-exh")
+		if rec.Attempts != i {
+			t.Fatalf("第 %d 次续发后 attempts 应为 %d，实际 %d", i, i, rec.Attempts)
+		}
+	}
+	if fk.callCount() != maxResendAttempts+1 {
+		t.Fatalf("首次+%d 次补发共应下发 %d 次，实际 %d",
+			maxResendAttempts, maxResendAttempts+1, fk.callCount())
+	}
+
+	// 第 4 次 stale 命中：直接终态，不再下发。
+	clock += 120_001
+	r = s.HandleEvent(context.Background(), "evt-exh", objects)
+	if r.Failed != 1 || len(r.Items) != 1 || r.Items[0].ErrorKind != store.ErrorKindResendExhausted {
+		t.Fatalf("超出补发上限应置 resend_exhausted: %+v", r)
+	}
+	if fk.callCount() != maxResendAttempts+1 {
+		t.Fatalf("终态裁决不得再下发，实际 %d", fk.callCount())
+	}
+	rec, _ := st.GetSend(context.Background(), "evt-exh")
+	if rec.Status != store.StatusFailed || rec.ErrorKind != store.ErrorKindResendExhausted ||
+		rec.Attempts != maxResendAttempts {
+		t.Fatalf("终态记录异常: %#v", rec)
+	}
+
+	// 终态后继续重推只能跳过。
+	clock += 120_001
+	r = s.HandleEvent(context.Background(), "evt-exh", objects)
+	if r.Skipped != 1 {
+		t.Fatalf("终态重推应跳过: %+v", r)
 	}
 }

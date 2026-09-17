@@ -128,6 +128,75 @@ func TestReceiptCustomSuccessBody(t *testing.T) {
 	}
 }
 
+// TestReceiptIntermediateStatus 回归 #12：排队中/发送中等中间态不得被二态
+// 逻辑误判为 delivery_failed；只推进 seq_no 与回执时间，delivery_* 保持空。
+func TestReceiptIntermediateStatus(t *testing.T) {
+	svc, st := newReceiptSvc(t, 300)
+	chID := createChannel(t, st, "demo", true)
+	seedSuccess(t, st, "evt-mid", chID)
+
+	body := []byte(`{"smsId":"sms-m","appSmsId":"evt-mid","status":"SENDING","statusMessage":"queued","seqNo":3}`)
+	res, err := svc.Handle(context.Background(), chID, body, "10.1.1.4:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Delivered || res.DeliveryStatus != "" || !res.Applied {
+		t.Fatalf("中间态不应判定送达/失败，且应推进 seq_no: %+v", res)
+	}
+	rec, _ := st.GetSend(context.Background(), "evt-mid")
+	if rec.DeliveryStatus != "" || rec.DeliveryMessage != "" ||
+		rec.SeqNo != 3 || rec.ReceiptAt != 300 {
+		t.Fatalf("中间态只应推进 seq_no/receipt_at: %#v", rec)
+	}
+}
+
+// TestReceiptIntermediateDoesNotRegressDelivered 已送达后收到更新序号的
+// 中间态回执：送达结论不得被覆盖，仅序号推进。
+func TestReceiptIntermediateDoesNotRegressDelivered(t *testing.T) {
+	svc, st := newReceiptSvc(t, 300)
+	chID := createChannel(t, st, "demo", true)
+	seedSuccess(t, st, "evt-keep", chID)
+
+	ok := []byte(`{"appSmsId":"evt-keep","status":"DELIVRD","statusMessage":"done","seqNo":5}`)
+	if _, err := svc.Handle(context.Background(), chID, ok, "10.1.1.5:1"); err != nil {
+		t.Fatal(err)
+	}
+	mid := []byte(`{"appSmsId":"evt-keep","status":"SENDING","statusMessage":"queued","seqNo":6}`)
+	res, err := svc.Handle(context.Background(), chID, mid, "10.1.1.5:2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Applied {
+		t.Fatal("更新序号的中间态回执应落 seq_no")
+	}
+	rec, _ := st.GetSend(context.Background(), "evt-keep")
+	if rec.DeliveryStatus != "delivered" || rec.DeliveryMessage != "done" || rec.SeqNo != 6 {
+		t.Fatalf("中间态不得回退已送达状态: %#v", rec)
+	}
+}
+
+// TestReceiptCrossChannelRejected 回归 #4：回执通道与记录归属通道不一致时
+// Found=true 但 Applied=false，记录完全不被改动（防跨通道伪造送达）。
+func TestReceiptCrossChannelRejected(t *testing.T) {
+	svc, st := newReceiptSvc(t, 300)
+	ch1 := createChannel(t, st, "demo-1", true)
+	ch2 := createChannel(t, st, "demo-2", true)
+	seedSuccess(t, st, "evt-x", ch1)
+
+	body := []byte(`{"appSmsId":"evt-x","status":"DELIVRD","statusMessage":"ok","seqNo":1}`)
+	res, err := svc.Handle(context.Background(), ch2, body, "10.9.9.9:1")
+	if err != nil {
+		t.Fatalf("跨通道回执不报错（仍回 ACK 防厂商探测）: %v", err)
+	}
+	if !res.Found || res.Applied {
+		t.Fatalf("跨通道回执应 Found=true/Applied=false: %+v", res)
+	}
+	rec, _ := st.GetSend(context.Background(), "evt-x")
+	if rec.DeliveryStatus != "" || rec.DeliveryMessage != "" || rec.SeqNo != 0 || rec.ReceiptAt != 0 {
+		t.Fatalf("跨通道回执不得回写任何字段: %#v", rec)
+	}
+}
+
 func TestReceiptBadPayload(t *testing.T) {
 	svc, st := newReceiptSvc(t, 300)
 	chID := createChannel(t, st, "demo", true)

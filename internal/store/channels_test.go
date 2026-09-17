@@ -210,6 +210,55 @@ func (s *Store) mustSecretCiphertext(t *testing.T, channelID, name string) strin
 	return ct
 }
 
+func TestReplaceChannelConfigAtomicAndOrphanCleanup(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	ch, _ := s.CreateChannel(ctx, "c", "旧描述", `{"k":"old"}`, map[string]string{
+		"appSecret": "v1",
+		"token":     "t1",
+		"legacy":    "gone", // 配置中已不再声明的历史密钥
+	})
+
+	ch.Name = "c2"
+	ch.Description = "新描述"
+	ch.ConfigJSON = `{"k":"new"}`
+	// 全量密钥视图：appSecret 更新、token 保持、legacy 不在声明集合内应被清除
+	err := s.ReplaceChannelConfig(ctx, *ch, map[string]string{
+		"appSecret": "v2",
+		"token":     "t1",
+	}, []string{"appSecret", "token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, _ := s.GetChannel(ctx, ch.ID)
+	if got.Name != "c2" || got.Description != "新描述" || got.ConfigJSON != `{"k":"new"}` {
+		t.Fatalf("配置更新异常: %#v", got)
+	}
+	plain, _ := s.GetChannelSecrets(ctx, ch.ID)
+	if plain["appSecret"] != "v2" || plain["token"] != "t1" {
+		t.Fatalf("密钥 UPSERT 异常: %#v", plain)
+	}
+	if _, ok := plain["legacy"]; ok {
+		t.Fatal("未声明的孤儿密钥必须在同事务清除")
+	}
+
+	// 声明集合为空：全部密钥清空（配置不再含任何 secret 常量）
+	if err := s.ReplaceChannelConfig(ctx, *got, map[string]string{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	plain, _ = s.GetChannelSecrets(ctx, ch.ID)
+	if len(plain) != 0 {
+		t.Fatalf("声明集合为空时应清空全部密钥: %#v", plain)
+	}
+
+	// 不存在的通道返回 ErrNotFound，不得写入密钥
+	missing := Channel{ID: "nope", Name: "x"}
+	if err := s.ReplaceChannelConfig(ctx, missing, map[string]string{"a": "1"}, []string{"a"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("应 ErrNotFound，实际 %v", err)
+	}
+}
+
 func TestBindingsUpsert(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

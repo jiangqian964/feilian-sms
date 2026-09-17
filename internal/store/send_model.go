@@ -14,6 +14,12 @@ const (
 	SourceTest    = "test"    // WebUI 测试发送
 )
 
+// 厂商异步回执归一化后的送达状态（delivery_status）。
+const (
+	StatusDeliveryDelivered = "delivered"       // 已送达
+	StatusDeliveryFailed    = "delivery_failed" // 送达失败
+)
+
 // 失败分类（error_kind），供发送记录筛选与运维定位。
 const (
 	ErrorKindUnbound         = "unbound"           // 场景未绑定通道
@@ -26,6 +32,7 @@ const (
 	ErrorKindNetwork         = "network"           // 网络层错误（连接拒绝/DNS/5xx 等）
 	ErrorKindTimeout         = "timeout"           // 下游超时
 	ErrorKindInternal        = "internal"          // 网关内部错误
+	ErrorKindResendExhausted = "resend_exhausted"  // 超过最大补发次数仍未确认
 )
 
 // SendStatus 发送主状态。
@@ -54,6 +61,10 @@ type SendRecord struct {
 	LatencyMS       int64      `json:"latency_ms"`
 	CreatedAt       int64      `json:"created_at"`
 	UpdatedAt       int64      `json:"updated_at"`
+	Attempts        int        `json:"attempts"`
+	// EncryptedPayload 是原始短信对象的 AES-GCM 密文，仅供补发 worker 解密重放，
+	// 不参与 JSON 序列化与管理 API 回显。
+	EncryptedPayload string `json:"-"`
 }
 
 // MarkSuccess 是 pending→success 的回写参数。
@@ -77,10 +88,17 @@ type MarkFailed struct {
 // ReceiptUpdate 是厂商异步回执的回写参数（不改主状态）。
 type ReceiptUpdate struct {
 	AppSmsID        string
+	ChannelID       string // 归属通道；与记录 channel_id 不一致时拒绝回写（防跨通道伪造）
 	DeliveryStatus  string
 	DeliveryMessage string
 	SeqNo           int
 	ReceiptAtMS     int64
+}
+
+// ReceiptApplyResult 表示一次回执回写的裁决结果。
+type ReceiptApplyResult struct {
+	Found   bool // 是否存在对应 app_sms_id 的记录
+	Applied bool // 本次是否真正执行了 UPDATE（乱序/跨通道/状态回退时为 false）
 }
 
 // SendFilter 是发送记录列表筛选与分页条件（零值表示不限制）。

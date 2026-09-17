@@ -68,6 +68,7 @@ export function renderChannelForm(ch) {
   const rAppMsgID = inp(rc.app_msg_id_path || '', 'appSmsId');
   const rStatus = inp(rc.status_path || '', 'status');
   const rDelivered = inp(rc.delivered_value || '', 'DELIVRD');
+  const rFailed = inp(rc.failure_value || '', 'UNDELIV');
   const rMsgPath = inp(rc.message_path || '', 'statusMessage');
   const rSeq = inp(rc.seq_no_path || '', 'seqNo');
   const rBody = inp(rc.success_body || '', '留空=默认 {"status":0,"message":"success"}');
@@ -91,11 +92,11 @@ export function renderChannelForm(ch) {
       fld('成功标志路径', sucPath), fld('成功期望值', sucVal),
       fld('厂商消息 ID 路径', msgIDPath), fld('错误描述路径', msgPath))),
     section('手机号归一化', null, fld('策略', policySel)),
-    section('厂商异步回执映射', '网关对回执默认固定回 {status:0,message:success}；success_body 可自定义原文。', grid2(
+    section('厂商异步回执映射', '送达状态三态：等于送达成功值→已送达；等于送达失败值→送达失败；其他值（排队中/发送中）保持原状态，仅推进序号。网关对回执默认固定回 {status:0,message:success}；success_body 可自定义原文。', grid2(
       fld('厂商短信 ID 字段', rMsgID), fld('我方 appSmsId 字段', rAppMsgID),
       fld('回执状态字段', rStatus), fld('送达成功值', rDelivered),
-      fld('回执描述字段', rMsgPath), fld('回执序号字段', rSeq),
-      fld('成功响应原文', rBody))));
+      fld('送达失败值', rFailed), fld('回执描述字段', rMsgPath),
+      fld('回执序号字段', rSeq), fld('成功响应原文', rBody))));
 
   function collect() {
     const name = nameIn.value.trim();
@@ -135,6 +136,7 @@ export function renderChannelForm(ch) {
         receipt: {
           msg_id_path: rMsgID.value.trim(), app_msg_id_path: rAppMsgID.value.trim(),
           status_path: rStatus.value.trim(), delivered_value: rDelivered.value.trim(),
+          failure_value: rFailed.value.trim(),
           message_path: rMsgPath.value.trim(), seq_no_path: rSeq.value.trim(),
           success_body: rBody.value,
         },

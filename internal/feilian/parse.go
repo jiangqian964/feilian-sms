@@ -72,6 +72,42 @@ func ParseEnvelope(raw []byte) (*Envelope, error) {
 	return env, nil
 }
 
+// EventHeaderView 是事件信封的头部轻量解析结果（不解析 data.events）。
+type EventHeaderView struct {
+	Schema string
+	Header Header
+}
+
+// ParseEventHeader 仅解析 schema 与 header（token/event_type 等），不校验
+// data.events 的短信对象结构。用途：webhook 必须先完成 token 鉴权再决定
+// 是否忽略非短信事件，而 device.* 等其他事件的 object 本来就不是短信结构，
+// 不能用 ParseEnvelope 的短信校验去拦截它们。
+func ParseEventHeader(raw []byte) (*EventHeaderView, error) {
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("事件请求体为空")
+	}
+	var probe struct {
+		Schema string `json:"schema"`
+		Header Header `json:"header"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return nil, fmt.Errorf("解析事件 JSON 失败: %w", err)
+	}
+	if probe.Schema == "" {
+		return nil, fmt.Errorf("事件缺少 schema 字段")
+	}
+	if probe.Schema != supportedSchema {
+		return nil, fmt.Errorf("不支持的事件 schema %q（仅支持 %s）", probe.Schema, supportedSchema)
+	}
+	if probe.Header.Token == "" {
+		return nil, fmt.Errorf("事件 header 缺少 token")
+	}
+	if probe.Header.EventType == "" {
+		return nil, fmt.Errorf("事件 header 缺少 event_type")
+	}
+	return &EventHeaderView{Schema: probe.Schema, Header: probe.Header}, nil
+}
+
 // Challenge 是订阅保存时飞连发来的 url_verification 握手请求。
 type Challenge struct {
 	Challenge string `json:"challenge"`

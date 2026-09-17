@@ -165,6 +165,51 @@ func TestBuildBody(t *testing.T) {
 			},
 			wantErr: "target",
 		},
+		{
+			// 回归：父链含多个切片段时旧 setBack 强转 map 直接 panic。
+			name: "连续数组下标 a.0.0.0 不得 panic",
+			mappings: []Mapping{
+				{Target: "a.0.0.0", SourceType: SourceLiteral, Source: "deep", ValueType: ValueString},
+			},
+			check: func(t *testing.T, body map[string]any) {
+				l0 := body["a"].([]any)
+				l1 := l0[0].([]any)
+				l2 := l1[0].([]any)
+				if l2[0] != "deep" {
+					t.Fatalf("深层数组写入失败: %#v", body)
+				}
+			},
+		},
+		{
+			// 回归：map 与 slice 父节点交替时的扩容挂回。
+			name: "数组对象数组混合扩容 rows.0.cells.1",
+			mappings: []Mapping{
+				{Target: "rows.0.cells.1", SourceType: SourceLiteral, Source: "c2", ValueType: ValueString},
+				{Target: "rows.0.cells.0", SourceType: SourceLiteral, Source: "c1", ValueType: ValueString},
+			},
+			check: func(t *testing.T, body map[string]any) {
+				rows := body["rows"].([]any)
+				cells := rows[0].(map[string]any)["cells"].([]any)
+				if cells[0] != "c1" || cells[1] != "c2" {
+					t.Fatalf("混合扩容写入失败: %#v", body)
+				}
+			},
+		},
+		{
+			name: "负数下标报错",
+			mappings: []Mapping{
+				{Target: "a.-1", SourceType: SourceLiteral, Source: "y", ValueType: ValueString},
+			},
+			wantErr: "非负整数",
+		},
+		{
+			// 回归：试渲染期 make 巨型切片可 OOM 杀死进程，须提前拒绝。
+			name: "超大下标报错而非 OOM",
+			mappings: []Mapping{
+				{Target: "list.2147483647.x", SourceType: SourceLiteral, Source: "y", ValueType: ValueString},
+			},
+			wantErr: "超过上限",
+		},
 	}
 
 	for _, tt := range tests {
@@ -189,5 +234,26 @@ func TestBuildBody(t *testing.T) {
 			}
 			tt.check(t, body)
 		})
+	}
+}
+
+func TestArrayIndexBoundary(t *testing.T) {
+	// 恰好等于上限（10000）允许：切片长度 10001，内存可忽略。
+	body, err := BuildBody([]Mapping{
+		{Target: "a.10000", SourceType: SourceLiteral, Source: "edge", ValueType: ValueString},
+	}, nil, nil)
+	if err != nil {
+		t.Fatalf("边界下标 10000 应允许: %v", err)
+	}
+	got := body["a"].([]any)
+	if len(got) != 10001 || got[10000] != "edge" {
+		t.Fatalf("边界写入异常: len=%d v=%v", len(got), got[10000])
+	}
+
+	// 超过 1 即拒绝，且不得分配巨型切片（错误在 make 之前返回）。
+	if _, err := BuildBody([]Mapping{
+		{Target: "a.10001", SourceType: SourceLiteral, Source: "x", ValueType: ValueString},
+	}, nil, nil); err == nil || !strings.Contains(err.Error(), "超过上限") {
+		t.Fatalf("下标 10001 应被拒绝，实际 %v", err)
 	}
 }

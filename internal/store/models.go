@@ -10,6 +10,7 @@ var ErrNotFound = errors.New("记录不存在")
 type Settings struct {
 	VerificationToken   string `json:"verification_token"`
 	EncryptKey          string `json:"encrypt_key,omitempty"`
+	ReceiptAuthToken    string `json:"receipt_auth_token,omitempty"`
 	WebhookPath         string `json:"webhook_path"`
 	PublicBaseURL       string `json:"public_base_url"`
 	DownstreamTimeoutMS int    `json:"downstream_timeout_ms"`

@@ -39,6 +39,12 @@ func (r *SettingsRuntime) EncryptKey() string {
 	return r.cache.Current().Settings.EncryptKey
 }
 
+// ReceiptAuthToken 返回厂商异步回执的全局鉴权 token；空串表示不校验。
+// 恒定时间比较在入站层完成，明文仅存在于内存快照，日志禁止输出。
+func (r *SettingsRuntime) ReceiptAuthToken() string {
+	return r.cache.Current().Settings.ReceiptAuthToken
+}
+
 // DownstreamTimeoutMS 返回单次下游下发超时（毫秒）。
 func (r *SettingsRuntime) DownstreamTimeoutMS() int {
 	return r.cache.Current().Settings.DownstreamTimeoutMS

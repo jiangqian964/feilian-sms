@@ -28,8 +28,17 @@ const (
 	// 单次下发实际超时由系统设置（默认 2000ms）经 context 热生效控制，
 	// 这里只给一个足够大的硬上限，避免客户端 Timeout 反向压缩热配置。
 	downstreamCeilingMS = 60000
-	shutdownGrace       = 5 * time.Second
+	// shutdownGrace 是整段优雅关停总预算：先停接入层等待在途请求，再停
+	// 后台补发 worker；systemd 单元的 TimeoutStopSec 必须大于此值。
+	shutdownGrace = 10 * time.Second
+	// httpShutdownTimeout 是接入层等待在途请求完成的预算（webhook 单条下游
+	// 超时 2s，该预算足以排空批量在途请求）。
+	httpShutdownTimeout = 6 * time.Second
 	readHeaderTimeout   = 10 * time.Second
+	// readTimeout 覆盖完整请求读取（含 body，事件体上限 1MiB）；
+	// idleTimeout 限制 keep-alive 空连占用，缓解慢连接资源堆积（#8）。
+	readTimeout = 30 * time.Second
+	idleTimeout = 120 * time.Second
 )
 
 func main() {
@@ -60,10 +69,16 @@ func main() {
 	if err != nil {
 		logger.Fatal("初始化配置快照失败", zap.Error(err))
 	}
+	// 热加载失败时不得静默沿用旧快照：落 Error 日志便于巡检发现（#16）。
+	cache.SetReloadErrorHook(func(reloadErr error) {
+		logger.Error("配置快照热加载失败，继续沿用上一版本快照", zap.Error(reloadErr))
+	})
 
 	settingsRT := service.NewSettingsRuntime(cache)
 	sender := channel.NewClient(downstreamCeilingMS)
 	forwardSvc := service.NewForwardService(st, cache, sender).WithLogger(logger)
+	// 后台补发 worker：扫描 stale pending 并重放，随优雅关停一起停止（#2/#11）。
+	forwardSvc.StartResendWorker(service.DefaultResendInterval)
 	receiptSvc := service.NewReceiptService(st, cache)
 
 	uiHandler, err := webui.Handler()
@@ -88,6 +103,10 @@ func main() {
 		Addr:              cfg.Server.Listen,
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: readHeaderTimeout,
+		// 不设置 WriteTimeout：webhook 需按下游超时预算同步等待批量下发，
+		// 单次下发另有 context 级超时；读侧与空连超时足以缓解慢速连接占用（#8）。
+		ReadTimeout: readTimeout,
+		IdleTimeout: idleTimeout,
 	}
 
 	serverErr := make(chan error, 1)
@@ -110,11 +129,20 @@ func main() {
 		logger.Fatal("HTTP 服务异常退出", zap.Error(listenErr))
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
-	defer cancel()
-	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
-		logger.Error("优雅关闭超时或失败，强制关闭", zap.Error(err))
+	// 关停顺序（#2/#11）：先停接入层，不再接收新请求并等待在途事件处理完成
+	// （事件处理在请求内同步完成下发与回写）；再取消后台上下文、等待补发 worker
+	// 退出；SQLite 由 defer 最后关闭，杜绝 worker/回写落在已关闭的连接上。
+	httpCtx, httpCancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
+	if err := httpSrv.Shutdown(httpCtx); err != nil {
+		logger.Error("接入层优雅关闭超时或失败，强制关闭", zap.Error(err))
 		_ = httpSrv.Close()
 	}
+	httpCancel()
+
+	fwdCtx, fwdCancel := context.WithTimeout(context.Background(), shutdownGrace-httpShutdownTimeout)
+	if err := forwardSvc.Shutdown(fwdCtx); err != nil {
+		logger.Error("后台补发服务停止超时，放弃等待（未确认记录保留下次补发）", zap.Error(err))
+	}
+	fwdCancel()
 	logger.Info("sms-gateway 已停止")
 }

@@ -11,7 +11,11 @@ const ERROR_LABEL = {
   unbound: '场景未绑定', binding_disabled: '绑定已停用', channel_disabled: '通道已停用',
   channel_not_found: '通道不存在', invalid_mobile: '手机号非法', render: '配置渲染失败',
   vendor: '厂商业务失败', network: '网络错误', timeout: '下游超时', internal: '内部错误',
+  resend_exhausted: '补发次数耗尽',
 };
+
+// 详情抽屉单例：连续点击不同行时先关旧抽屉，避免遮罩/抽屉与 Esc 监听堆叠。
+let activeDrawerClose = null;
 
 export async function mountRecords(root) {
   root.append(h('div', { class: 'page-head' },
@@ -181,11 +185,18 @@ function kv(title, items) {
 }
 
 function openDrawer(r, channels) {
+  // 已打开抽屉时先关闭（单例守卫），防止重复 append 与监听器泄漏。
+  if (activeDrawerClose) activeDrawerClose();
+
   const chName = (channels.find((c) => c.id === r.channel_id) || {}).name || r.channel_id || '—';
   let params = r.params_masked || '[]';
   try { params = JSON.stringify(JSON.parse(params)); } catch { /* 保留原文 */ }
 
-  const close = () => { mask.remove(); drawer.remove(); document.removeEventListener('keydown', onKey); };
+  const close = () => {
+    mask.remove(); drawer.remove();
+    document.removeEventListener('keydown', onKey);
+    if (activeDrawerClose === close) activeDrawerClose = null;
+  };
   const onKey = (e) => { if (e.key === 'Escape') close(); };
 
   const head = h('div', { class: 'drawer-head' },
@@ -206,6 +217,7 @@ function openDrawer(r, channels) {
       ['状态', STATUS_LABEL[r.status] || r.status],
       ['错误分类', r.error_kind ? (ERROR_LABEL[r.error_kind] || r.error_kind) : ''],
       ['耗时', r.latency_ms ? fmtDuration(r.latency_ms) : ''],
+      ['补发次数', r.attempts ? String(r.attempts) : ''],
       ['厂商消息 ID', r.provider_msg_id],
       ['厂商状态码', r.provider_status],
       ['厂商描述', r.provider_message],
@@ -221,4 +233,5 @@ function openDrawer(r, channels) {
   const mask = h('div', { class: 'drawer-mask', on: { click: close } });
   document.body.append(mask, drawer);
   document.addEventListener('keydown', onKey);
+  activeDrawerClose = close;
 }

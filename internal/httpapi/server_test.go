@@ -310,6 +310,16 @@ func TestNonSMSEvent200WithoutDispatch(t *testing.T) {
 	if sender.count() != 0 {
 		t.Fatal("非短信事件不得触发下发")
 	}
+
+	// 回归 #5：未通过 token 校验的非短信事件必须先被 401 拒绝，
+	// 不能借「非短信事件 200」分支探测 webhook 有效性。
+	bad := bytes.ReplaceAll(body, []byte(`"`+testToken+`"`), []byte(`"wrong-token"`))
+	if w := do(srv, http.MethodPost, testPath, bad, "10.0.0.1:5000", nil); w.Code != http.StatusUnauthorized {
+		t.Fatalf("非短信事件错 token 应先被 401，实际 %d", w.Code)
+	}
+	if sender.count() != 0 {
+		t.Fatal("鉴权失败不得触发下发")
+	}
 }
 
 // ---- TR-10.2：webhook 路径与 token 同进程热切换 ----

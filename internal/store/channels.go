@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -168,6 +169,75 @@ func (s *Store) PutChannelSecrets(ctx context.Context, channelID string, secrets
 	if err := putSecretsTx(ctx, tx, s.dataKey, channelID, secrets); err != nil {
 		_ = tx.Rollback()
 		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.notifyChanged()
+	return nil
+}
+
+// ReplaceChannelConfig 在同一事务内完成「配置更新 + 全量密钥替换 + 孤儿密钥清理」，
+// 避免原来 UpdateChannel 与 PutChannelSecrets 两个独立事务在中途失败时留下半成品。
+// secrets 为该通道当前应有的全部密钥明文（调用方已合并既有值与本次提交）；
+// declaredSecretNames 为配置中声明为 secret 的常量集合，不在集合内的旧密文行删除，
+// 防止常量改名/取消密钥后旧密文残留或被未来同名常量静默「复活」。
+func (s *Store) ReplaceChannelConfig(ctx context.Context, ch Channel, secrets map[string]string, declaredSecretNames []string) error {
+	if ch.ID == "" {
+		return errors.New("通道 ID 不能为空")
+	}
+	if ch.Name == "" {
+		return errors.New("通道名称不能为空")
+	}
+	if ch.ConfigJSON == "" {
+		ch.ConfigJSON = "{}"
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx, `
+		UPDATE channels SET name = ?, description = ?, enabled = ?,
+		    config_json = ?, updated_at = ?
+		WHERE id = ?`,
+		ch.Name, ch.Description, boolToInt(ch.Enabled), ch.ConfigJSON,
+		time.Now().UnixMilli(), ch.ID)
+	if err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		_ = tx.Rollback()
+		return ErrNotFound
+	}
+	if err := putSecretsTx(ctx, tx, s.dataKey, ch.ID, secrets); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if len(declaredSecretNames) == 0 {
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM channel_secrets WHERE channel_id = ?`, ch.ID); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	} else {
+		placeholders := strings.Repeat("?,", len(declaredSecretNames))
+		placeholders = placeholders[:len(placeholders)-1]
+		args := make([]any, 0, len(declaredSecretNames)+1)
+		args = append(args, ch.ID)
+		for _, name := range declaredSecretNames {
+			args = append(args, name)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM channel_secrets WHERE channel_id = ? AND name NOT IN (`+placeholders+`)`,
+			args...); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return err
